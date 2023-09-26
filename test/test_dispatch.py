@@ -101,28 +101,26 @@ class TestDispatch(TestCase):
 
         # double underscore to make it less likely we conflict with something
         # else
-        test_namespace = "__test{}__".format(self.namespace_index)
+        test_namespace = f"__test{self.namespace_index}__"
 
         def check_invariants(actual_provenance):
             C._dispatch_check_invariants(name)
             # Normalize the test namespace so that expected outputs are stable
             actual_state = C._dispatch_dump(
-                "{}::{}".format(test_namespace, name)).replace(test_namespace, "test")
+                f"{test_namespace}::{name}").replace(test_namespace, "test")
             actual_table = C._dispatch_dump_table(
-                "{}::{}".format(test_namespace, name)).replace(test_namespace, "test")
+                f"{test_namespace}::{name}").replace(test_namespace, "test")
             expected_state, expected_table, expected_provenance = results.setdefault(
                 frozenset(active_ops),
                 Result(actual_state, actual_table, actual_provenance)
             )
             self.assertMultiLineEqual(
                 expected_state, actual_state,
-                "expected from {}; actual from {}"
-                .format(expected_provenance, actual_provenance)
+                f"expected from {expected_provenance}; actual from {actual_provenance}"
             )
             self.assertMultiLineEqual(
                 expected_table, actual_table,
-                "expected from {}; actual from {}"
-                .format(expected_provenance, actual_provenance)
+                f"expected from {expected_provenance}; actual from {actual_provenance}"
             )
 
         results.setdefault(frozenset(), Result("", "", "hardcoded initial state"))
@@ -138,7 +136,7 @@ class TestDispatch(TestCase):
             active_ops.add(op_ix)
             try:
                 ops[op_ix](refs[op_ix])
-                check_invariants("running ctors {}".format(ctor_order[:i + 1]))
+                check_invariants(f"running ctors {ctor_order[:i + 1]}")
             except RuntimeError as e:
                 if not expect_raises:
                     raise
@@ -146,7 +144,7 @@ class TestDispatch(TestCase):
                 actual = actual.split("\nException raised from ")[0]
                 expected, _, expected_provenance = results.setdefault(
                     frozenset(active_ops),
-                    Result(actual, "", "error after running ctors {}".format(ctor_order[:i + 1]))
+                    Result(actual, "", f"error after running ctors {ctor_order[:i + 1]}")
                 )
                 self.assertMultiLineEqual(expected, actual, expected_provenance)
                 set_to_report = frozenset(active_ops)
@@ -154,10 +152,10 @@ class TestDispatch(TestCase):
                 # NB: this finally test asserts that if a registrations fails,
                 # the dispatcher is left in the same state *that it was before*!
                 check_invariants(
-                    "running ctors {} and then failing to run ctor {} "
+                    f"running ctors {ctor_order[:i]} and then failing to run ctor {op_ix} "
                     "(did this failure leave the dispatcher in a wedged state? "
                     "it shouldn't!)"
-                    .format(ctor_order[:i], op_ix))
+                )
                 break
         last_ctor = i
         if expect_raises and len(active_ops) == len(ops):
@@ -167,7 +165,7 @@ class TestDispatch(TestCase):
             self.assertTrue(
                 False,
                 "expected exception to be raised, but nothing was raised "
-                "(after running ctors {})".format(ctor_order))
+                f"(after running ctors {ctor_order})")
         # In the order specified by dtor_order, run deregistrations
         for i, op_ix in enumerate(dtor_order):
             # Trigger a destruction
@@ -179,8 +177,7 @@ class TestDispatch(TestCase):
             else:
                 active_ops.remove(op_ix)
             check_invariants(
-                "running ctors {}, then running dtors {}"
-                .format(ctor_order[:last_ctor + 1], dtor_order[:i + 1])
+                f"running ctors {ctor_order[:last_ctor + 1]}, then running dtors {dtor_order[:i + 1]}"
             )
         return results[set_to_report][0]
 
@@ -243,13 +240,13 @@ class TestDispatch(TestCase):
         ]).state
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x) -> (Tensor)
+schema: test::foo(Tensor x) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
-CPU: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-AutogradCPU: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-Autograd[alias]: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias]: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+AutogradCPU: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+Autograd[alias]: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
     def test_def_impl_schema_mismatch(self):
@@ -264,9 +261,9 @@ CompositeImplicitAutograd[alias]: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed
         self.assertExpectedInline(state, '''\
 Inferred operator schema for a C++ kernel function doesn't match the expected function schema.
   operator: test::foo
-  expected schema: test::foo(Tensor x, Tensor y) -> (Tensor)
+  expected schema: test::foo(Tensor x, Tensor y) -> Tensor
     registered at /dev/null:0
-  inferred schema: (Tensor _0) -> (Tensor _0)
+  inferred schema: (Tensor _0) -> Tensor _0
     impl_t_t
   reason: The number of arguments is different. 2 vs 1.''')
 
@@ -283,13 +280,13 @@ Inferred operator schema for a C++ kernel function doesn't match the expected fu
         ]).state
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor _0) -> (Tensor _0)
+schema: test::foo(Tensor _0) -> Tensor _0
 debug: registered at /dev/null:0
 alias analysis kind: CONSERVATIVE
-CPU: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-AutogradCPU: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-Autograd[alias]: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias]: default_def_name_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+AutogradCPU: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+Autograd[alias]: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: default_def_name_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
     def test_def_only(self):
@@ -299,7 +296,7 @@ CompositeImplicitAutograd[alias]: default_def_name_t_t :: (Tensor _0) -> (Tensor
         ]).state
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x, Tensor y) -> (Tensor)
+schema: test::foo(Tensor x, Tensor y) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
 ''')
@@ -318,10 +315,10 @@ alias analysis kind: FROM_SCHEMA
         self.assertExpectedInline(state, '''\
 name: test::foo
 schema: (none)
-CPU: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-AutogradCPU: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-Autograd[alias]: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias]: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+AutogradCPU: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+Autograd[alias]: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
     def test_computed_table(self):
@@ -340,14 +337,14 @@ CompositeImplicitAutograd[alias]: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor _0) -> (Tensor _0)
+schema: test::foo(Tensor _0) -> Tensor _0
 debug: registered at /dev/null:0
 alias analysis kind: CONSERVATIVE
-CPU: fn_cpu :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-XLA: fn_xla :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-AutogradCPU: fn_autogradcpu :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-Autograd[alias]: fn_autograd :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias]: default_def_name_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: fn_cpu :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+XLA: fn_xla :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+AutogradCPU: fn_autogradcpu :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+Autograd[alias]: fn_autograd :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: default_def_name_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -375,11 +372,11 @@ AutogradXLA: fn_autograd [autograd kernel]
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor _0) -> (Tensor _0)
+schema: test::foo(Tensor _0) -> Tensor _0
 debug: registered at /dev/null:0
 alias analysis kind: CONSERVATIVE
-CPU: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias]: default_def_name_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: default_def_name_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -391,7 +388,7 @@ CPU: impl_t_t [kernel]
 CUDA: default_def_name_t_t [math kernel]
 XLA: default_def_name_t_t [math kernel]
 AutogradOther: default_def_name_t_t [math kernel]
-AutogradCPU: fallthrough registered in pytorch framework [backend fallback]
+AutogradCPU: registered in pytorch framework [backend fallback]
 AutogradCUDA: default_def_name_t_t [math kernel]
 AutogradXLA: default_def_name_t_t [math kernel]
 ''')
@@ -407,10 +404,10 @@ AutogradXLA: default_def_name_t_t [math kernel]
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x) -> (Tensor)
+schema: test::foo(Tensor x) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
-CompositeImplicitAutograd[alias]: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -440,11 +437,11 @@ AutogradXLA: impl_t_t [math kernel]
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x) -> (Tensor)
+schema: test::foo(Tensor x) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
-CPU: fn_cpu :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias]: fn_math :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: fn_cpu :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: fn_math :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -456,7 +453,7 @@ CPU: fn_cpu [kernel]
 CUDA: fn_math [math kernel]
 XLA: fn_math [math kernel]
 AutogradOther: fn_math [math kernel]
-AutogradCPU: fallthrough registered in pytorch framework [backend fallback]
+AutogradCPU: registered in pytorch framework [backend fallback]
 AutogradCUDA: fn_math [math kernel]
 AutogradXLA: fn_math [math kernel]
 ''')
@@ -472,10 +469,10 @@ AutogradXLA: fn_math [math kernel]
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x) -> (Tensor)
+schema: test::foo(Tensor x) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
-Autograd[alias]: impl_t_t :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+Autograd[alias]: impl_t_t :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -504,12 +501,12 @@ AutogradXLA: impl_t_t [autograd kernel]
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x) -> (Tensor)
+schema: test::foo(Tensor x) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
-CPU: fn_cpu :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-Autograd[alias]: fn_autograd :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias]: fn_math :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: fn_cpu :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+Autograd[alias]: fn_autograd :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: fn_math :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -538,11 +535,11 @@ AutogradXLA: fn_math [math kernel]
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x) -> (Tensor)
+schema: test::foo(Tensor x) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
-FPGA: fn_fpga :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias]: fn_math :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+FPGA: fn_fpga :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: fn_math :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -572,11 +569,11 @@ FPGA: fn_fpga [kernel]
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x) -> (Tensor)
+schema: test::foo(Tensor x) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
-CPU: fn_cpu :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeExplicitAutograd[alias]: fn_defaultbackend :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: fn_cpu :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeExplicitAutograd[alias]: fn_defaultbackend :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -587,10 +584,10 @@ Undefined: fn_defaultbackend [default backend kernel]
 CPU: fn_cpu [kernel]
 CUDA: fn_defaultbackend [default backend kernel]
 XLA: fn_defaultbackend [default backend kernel]
-AutogradOther: fallthrough registered in pytorch framework [backend fallback]
-AutogradCPU: fallthrough registered in pytorch framework [backend fallback]
-AutogradCUDA: fallthrough registered in pytorch framework [backend fallback]
-AutogradXLA: fallthrough registered in pytorch framework [backend fallback]
+AutogradOther: registered in pytorch framework [backend fallback]
+AutogradCPU: registered in pytorch framework [backend fallback]
+AutogradCUDA: registered in pytorch framework [backend fallback]
+AutogradXLA: registered in pytorch framework [backend fallback]
 ''')
 
     def test_computed_table_with_cpu_autograd_defaultbackend(self):
@@ -607,12 +604,12 @@ AutogradXLA: fallthrough registered in pytorch framework [backend fallback]
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x) -> (Tensor)
+schema: test::foo(Tensor x) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
-CPU: fn_cpu :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-Autograd[alias]: fn_autograd :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeExplicitAutograd[alias]: fn_defaultbackend :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: fn_cpu :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+Autograd[alias]: fn_autograd :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeExplicitAutograd[alias]: fn_defaultbackend :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -646,13 +643,13 @@ FPGA: fn_defaultbackend [default backend kernel]
         state, table = result.state, result.table
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x) -> (Tensor)
+schema: test::foo(Tensor x) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: FROM_SCHEMA
-CPU: fn_cpu :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-Autograd[alias]: fn_autograd :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias]: fn_math :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeExplicitAutograd[alias]: fn_defaultbackend :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CPU: fn_cpu :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+Autograd[alias]: fn_autograd :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: fn_math :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeExplicitAutograd[alias]: fn_defaultbackend :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 ''')
 
         # computed dispatch table is too big, so we only check on a few entries we're interested in.
@@ -678,7 +675,7 @@ AutogradXLA: fn_autograd [autograd kernel]
         ]
         self.assertExpectedInline(
             self.commute("foo", ops, expect_raises=True).state,
-            '''Tried to register an operator (test::foo(Tensor x, Tensor y) -> (Tensor)) with the same name and overload '''
+            '''Tried to register an operator (test::foo(Tensor x, Tensor y) -> Tensor) with the same name and overload '''
             '''name multiple times. Each overload's schema should only be registered with a single call to def(). '''
             '''Duplicate registration: registered at /dev/null:0. Original registration: registered at /dev/null:0'''
         )
@@ -693,7 +690,7 @@ AutogradXLA: fn_autograd [autograd kernel]
         ]).state
         self.assertExpectedInline(state, '''\
 name: test::foo
-schema: test::foo(Tensor x, Tensor y) -> (Tensor)
+schema: test::foo(Tensor x, Tensor y) -> Tensor
 debug: registered at /dev/null:0
 alias analysis kind: PURE_FUNCTION
 ''')
@@ -708,7 +705,7 @@ alias analysis kind: PURE_FUNCTION
         ]
         self.assertExpectedInline(
             self.commute("foo", ops, expect_raises=True).state,
-            '''Tried to register an operator (test::foo(Tensor x) -> (Tensor)) with the same name and overload '''
+            '''Tried to register an operator (test::foo(Tensor x) -> Tensor) with the same name and overload '''
             '''name multiple times. Each overload's schema should only be registered with a single call to def(). '''
             '''Duplicate registration: registered at /dev/null:0. Original registration: registered at /dev/null:0'''
         )
@@ -724,7 +721,7 @@ alias analysis kind: PURE_FUNCTION
         ]
         self.assertExpectedInline(
             self.commute("foo", ops, expect_raises=True).state,
-            '''Tried to register an operator (test::foo(Tensor x) -> (Tensor)) with the same name and overload '''
+            '''Tried to register an operator (test::foo(Tensor x) -> Tensor) with the same name and overload '''
             '''name multiple times. Each overload's schema should only be registered with a single call to def(). '''
             '''Duplicate registration: registered at /dev/null:0. Original registration: registered at /dev/null:0'''
         )
@@ -754,11 +751,15 @@ alias analysis kind: PURE_FUNCTION
             '''\
 name: test::foo
 schema: (none)
-CompositeImplicitAutograd[alias]: fn2 :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
-CompositeImplicitAutograd[alias] (inactive): fn1 :: (Tensor _0) -> (Tensor _0) [ boxed unboxed ]
+CompositeImplicitAutograd[alias]: fn2 :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
+CompositeImplicitAutograd[alias] (inactive): fn1 :: (Tensor _0) -> Tensor _0 [ boxed unboxed ]
 '''
         )
 
+    # Definition: a dangling impl happens when someone does an impl() on a
+    # function but not a def() for it. This is usually a bug, e.g. someone
+    # misspelled an operator name, or someone registered an impl for an op that
+    # no longer exists
     def test_find_dangling_impls(self):
         dangling_impls = C._dispatch_find_dangling_impls()
         self.assertEqual(
@@ -781,11 +782,11 @@ CompositeImplicitAutograd[alias] (inactive): fn1 :: (Tensor _0) -> (Tensor _0) [
         impls = C._dispatch_find_dangling_impls()
         self.assertEqual(1, len(impls))
         self.assertEqual(
-            '''\
+            f'''\
 name: __test::foo
 schema: (none)
-CPU: registered at {}:5 :: () -> () [ boxed unboxed ]
-'''.format(extension_path),
+CPU: registered at {extension_path}:5 :: () -> () [ boxed unboxed ]
+''',
             impls[0])
 
     def test_dispatch_print_registrations_for_dispatch_key_invalid(self):
@@ -810,9 +811,9 @@ XLA             fn_XLA [kernel]
 Lazy            fn_Lazy [kernel]
 FPGA            fn_CompositeImplicitAutograd [math kernel]
 AutogradOther   fn_CompositeImplicitAutograd [math kernel]
-AutogradCPU     fallthrough [backend fallback]
-AutogradXLA     fallthrough [backend fallback]
-AutogradLazy    fallthrough [backend fallback]
+AutogradCPU     [backend fallback]
+AutogradXLA     [backend fallback]
+AutogradLazy    [backend fallback]
 '''
         )
 
@@ -832,8 +833,8 @@ Lazy            fn_Lazy [kernel]
 FPGA            fn_CompositeImplicitAutograd [math kernel]
 AutogradOther   fn_CompositeImplicitAutograd [math kernel]
 AutogradCPU     fn_AutogradCPU [kernel]
-AutogradXLA     fallthrough [backend fallback]
-AutogradLazy    fallthrough [backend fallback]
+AutogradXLA     [backend fallback]
+AutogradLazy    [backend fallback]
 '''
         )
         self.assertExpectedInline(
@@ -865,10 +866,10 @@ CPU             fn_CPU [kernel]
 XLA             fn_XLA [kernel]
 Lazy            fn_Lazy [kernel]
 FPGA            fn_CompositeExplicitAutograd [default backend kernel]
-AutogradOther   fallthrough [backend fallback]
+AutogradOther   [backend fallback]
 AutogradCPU     fn_AutogradCPU [kernel]
-AutogradXLA     fallthrough [backend fallback]
-AutogradLazy    fallthrough [backend fallback]
+AutogradXLA     [backend fallback]
+AutogradLazy    [backend fallback]
 '''
         )
 
@@ -902,7 +903,7 @@ XLA             fn_CompositeImplicitAutograd [math kernel]
 Lazy            fn_CompositeImplicitAutograd [math kernel]
 FPGA            fn_FPGA [kernel]
 AutogradOther   ambiguous_autogradother [ambiguous autogradother]
-AutogradCPU     fallthrough [backend fallback]
+AutogradCPU     [backend fallback]
 AutogradXLA     fn_CompositeImplicitAutograd [math kernel]
 AutogradLazy    fn_CompositeImplicitAutograd [math kernel]
 '''
@@ -934,6 +935,21 @@ CompositeImplicitAutograd[alias] fn_CompositeImplicitAutograd
                 RuntimeError,
                 r"Registration to both CompositeImplicitAutograd and CompositeExplicitAutograd is not allowed"):
             dispatcher.register(["CompositeExplicitAutograd", "CompositeImplicitAutograd"])
+
+    def test_quantized_structured_not_implemented(self):
+        x = torch.zeros([1, 1, 1])
+        y = torch.zeros([1, 1, 1])
+        scale, zero_point = 1.0, 0
+        dtype = torch.qint8
+        qx = torch.quantize_per_tensor(x, scale, zero_point, dtype)
+        qy = torch.quantize_per_tensor(y, scale, zero_point, dtype)
+        # If bmm gets quantized support you need to update this to something
+        # else that is not implemented
+        self.assertRaisesRegex(
+            NotImplementedError,
+            "Could not run 'aten::bmm.out' with arguments from the 'QuantizedCPU' backend.",
+            lambda: torch.bmm(qx, qy)
+        )
 
 if __name__ == '__main__':
     run_tests()

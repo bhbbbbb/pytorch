@@ -1,3 +1,4 @@
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/MathBitsFallback.h>
 #include <ATen/native/MathBitFallThroughLists.h>
 
@@ -10,7 +11,7 @@ struct NegFallback : MathOpFallback {
   }
 };
 
-void negationFallback(const c10::OperatorHandle& op, DispatchKeySet dispatch_keys, torch::jit::Stack* stack) {
+static void negationFallback(const c10::OperatorHandle& op, DispatchKeySet dispatch_keys, torch::jit::Stack* stack) {
   NegFallback object;
   object.fallback_impl(op, dispatch_keys, stack);
 }
@@ -34,6 +35,7 @@ TORCH_LIBRARY_IMPL(aten, Negative, m) {
 
   // See test_metadata_check_when_primal_has_neg_bit in test_autograd.py
   m.impl("_has_same_storage_numel", torch::CppFunction::makeFallthrough());
+  m.impl("_new_zeros_with_same_feature_meta", torch::CppFunction::makeFallthrough());
 
   // linear algebra functions
   m.impl("linalg_solve_triangular", torch::CppFunction::makeFallthrough());

@@ -9,6 +9,7 @@ set(LAZY_TEST_SRCS
   ${LAZY_TEST_ROOT}/test_misc.cpp
   ${LAZY_TEST_ROOT}/test_permutation_util.cpp
   ${LAZY_TEST_ROOT}/test_shape.cpp
+  ${LAZY_TEST_ROOT}/test_trie_cache.cpp
   ${LAZY_TEST_ROOT}/test_util.cpp
 )
 if(BUILD_LAZY_TS_BACKEND)
@@ -32,12 +33,6 @@ target_link_libraries(test_lazy PRIVATE ${LAZY_TEST_DEPENDENCIES})
 target_include_directories(test_lazy PRIVATE ${ATen_CPU_INCLUDE})
 
 if(USE_CUDA)
-  target_link_libraries(test_lazy PRIVATE
-    ${CUDA_LIBRARIES}
-    ${CUDA_NVRTC_LIB}
-    ${CUDA_CUDA_LIB}
-    ${TORCH_CUDA_LIBRARIES})
-
   target_compile_definitions(test_lazy PRIVATE USE_CUDA)
 elseif(USE_ROCM)
   target_link_libraries(test_lazy PRIVATE

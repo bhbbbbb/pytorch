@@ -22,7 +22,8 @@ def make_np(x):
     if isinstance(x, torch.Tensor):
         return _prepare_pytorch(x)
     raise NotImplementedError(
-        'Got {}, but numpy array, torch tensor, or caffe2 blob name are expected.'.format(type(x)))
+        f"Got {type(x)}, but numpy array, torch tensor, or caffe2 blob name are expected."
+    )
 
 
 def _prepare_pytorch(x):
@@ -32,5 +33,6 @@ def _prepare_pytorch(x):
 
 def _prepare_caffe2(x):
     from caffe2.python import workspace
+
     x = workspace.FetchBlob(x)
     return x

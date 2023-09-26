@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from collections import namedtuple
 
@@ -11,6 +10,7 @@ from . import Sequential, ModuleList, Linear
 from .module import Module
 from ..functional import log_softmax
 
+__all__ = ['AdaptiveLogSoftmaxWithLoss']
 
 _ASMoutput = namedtuple('_ASMoutput', ['output', 'loss'])
 
@@ -120,7 +120,7 @@ class AdaptiveLogSoftmaxWithLoss(Module):
         dtype=None
     ) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(AdaptiveLogSoftmaxWithLoss, self).__init__()
+        super().__init__()
 
         cutoffs = list(cutoffs)
 
@@ -128,7 +128,7 @@ class AdaptiveLogSoftmaxWithLoss(Module):
                 or (min(cutoffs) <= 0) \
                 or (max(cutoffs) > (n_classes - 1)) \
                 or (len(set(cutoffs)) != len(cutoffs)) \
-                or any([int(c) != c for c in cutoffs]):
+                or any(int(c) != c for c in cutoffs):
 
             raise ValueError("cutoffs should be a sequence of unique, positive "
                              "integers sorted in an increasing order, where "
@@ -224,11 +224,9 @@ class AdaptiveLogSoftmaxWithLoss(Module):
             used_rows += row_indices.numel()
 
         if used_rows != batch_size:
-            raise RuntimeError("Target values should be in [0, {}], "
-                               "but values in range [{}, {}] "
-                               "were found. ".format(self.n_classes - 1,
-                                                     target.min().item(),
-                                                     target.max().item()))
+            raise RuntimeError(f"Target values should be in [0, {self.n_classes - 1}], "
+                               f"but values in range [{target.min().item()}, {target.max().item()}] "
+                               "were found. ")
 
         head_output = self.head(input)
         head_logprob = log_softmax(head_output, dim=1)

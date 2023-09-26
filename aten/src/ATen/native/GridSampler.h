@@ -5,14 +5,9 @@
 #include <cstdint>
 #include <utility>
 
-namespace at { namespace native {
+#include <ATen/native/GridSamplerUtils.h>
 
-namespace detail {
-
-  enum class GridSamplerInterpolation {Bilinear, Nearest, Bicubic};
-  enum class GridSamplerPadding {Zeros, Border, Reflection};
-
-}  // namespace detail
+namespace at::native {
 
 using detail::GridSamplerInterpolation;
 using detail::GridSamplerPadding;
@@ -300,4 +295,4 @@ static inline void get_cubic_coefficients_grad(
   coeffs[3] = (3 * A * x - 10 * A) * x + 8 * A;
 }
 
-}}  // namespace at::native
+}  // namespace at::native

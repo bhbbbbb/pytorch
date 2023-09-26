@@ -90,41 +90,40 @@ std::string get_openmp_version() {
   return ss.str();
 }
 
-std::string used_cpu_capability() {
+std::string get_cpu_capability() {
   // It is possible that we override the cpu_capability with
   // environment variable
-  std::ostringstream ss;
-  ss << "CPU capability usage: ";
   auto capability = native::get_cpu_capability();
   switch (capability) {
 #if defined(HAVE_VSX_CPU_DEFINITION)
     case native::CPUCapability::DEFAULT:
-      ss << "DEFAULT";
-      break;
+      return "DEFAULT";
     case native::CPUCapability::VSX:
-      ss << "VSX";
-      break;
+      return "VSX";
 #elif defined(HAVE_ZVECTOR_CPU_DEFINITION)
     case native::CPUCapability::DEFAULT:
-      ss << "DEFAULT";
-      break;
+      return "DEFAULT";
     case native::CPUCapability::ZVECTOR:
-      ss << "Z VECTOR";
-      break;
+      return "Z VECTOR";
 #else
     case native::CPUCapability::DEFAULT:
-      ss << "NO AVX";
-      break;
+      return "NO AVX";
     case native::CPUCapability::AVX2:
-      ss << "AVX2";
-      break;
+      return "AVX2";
     case native::CPUCapability::AVX512:
-      ss << "AVX512";
-      break;
+      return "AVX512";
 #endif
     default:
       break;
   }
+  return "";
+}
+
+static std::string used_cpu_capability() {
+  // It is possible that we override the cpu_capability with
+  // environment variable
+  std::ostringstream ss;
+  ss << "CPU capability usage: " << get_cpu_capability();
   return ss.str();
 }
 
@@ -195,6 +194,10 @@ std::string show_config() {
     ss << detail::getORTHooks().showConfig();
   }
 
+  if (hasXPU()) {
+    ss << detail::getXPUHooks().showConfig();
+  }
+
   ss << "  - Build settings: ";
   for (const auto& pair : caffe2::GetBuildOptions()) {
     if (!pair.second.empty()) {
@@ -205,7 +208,7 @@ std::string show_config() {
 
   // TODO: do HIP
   // TODO: do XLA
-  // TODO: do MLC
+  // TODO: do MPS
 
   return ss.str();
 }

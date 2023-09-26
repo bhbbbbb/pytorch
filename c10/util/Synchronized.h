@@ -2,6 +2,8 @@
 
 #include <mutex>
 
+#include <c10/util/C++17.h>
+
 namespace c10 {
 
 /**
@@ -14,7 +16,7 @@ namespace c10 {
  *
  * This class implements a small subset of the generic functionality
  * implemented by folly:Synchronized<T>. Specifically, only withLock<T>
- * is implemeted here since it's the smallest possible API that is
+ * is implemented here since it's the smallest possible API that is
  * able to cover a large surface area of functionality offered by
  * folly::Synchronized<T>.
  */
@@ -42,7 +44,7 @@ class Synchronized final {
    * provided callback safely.
    */
   template <typename CB>
-  typename std::result_of<CB(T&)>::type withLock(CB cb) {
+  typename c10::invoke_result_t<CB, T&> withLock(CB cb) {
     std::lock_guard<std::mutex> guard(this->mutex_);
     return cb(this->data_);
   }
@@ -53,7 +55,7 @@ class Synchronized final {
    * the provided callback safely.
    */
   template <typename CB>
-  typename std::result_of<CB(T const&)>::type withLock(CB cb) const {
+  typename c10::invoke_result_t<CB, T const&> withLock(CB cb) const {
     std::lock_guard<std::mutex> guard(this->mutex_);
     return cb(this->data_);
   }

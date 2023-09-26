@@ -14,7 +14,7 @@ import uuid
 import torch
 
 
-__all__ = ["TaskSpec", "Measurement", "_make_temp_dir"]
+__all__ = ["TaskSpec", "Measurement", "select_unit", "unit_to_english", "trim_sigfig", "ordered_unique", "set_torch_threads"]
 
 
 _MAX_SIGNIFICANT_FIGURES = 4
@@ -233,7 +233,7 @@ class Measurement:
         Merge will extrapolate times to `number_per_run=1` and will not
         transfer any metadata. (Since it might differ between replicates)
         """
-        grouped_measurements: DefaultDict[TaskSpec, List["Measurement"]] = collections.defaultdict(list)
+        grouped_measurements: DefaultDict[TaskSpec, List[Measurement]] = collections.defaultdict(list)
         for m in measurements:
             grouped_measurements[m.task_spec].append(m)
 
@@ -325,7 +325,7 @@ def _make_temp_dir(prefix: Optional[str] = None, gc_dev_shm: bool = False) -> st
                 if not os.path.exists(owner_file):
                     continue
 
-                with open(owner_file, "rt") as f:
+                with open(owner_file) as f:
                     owner_pid = int(f.read())
 
                 if owner_pid == os.getpid():
@@ -349,7 +349,7 @@ def _make_temp_dir(prefix: Optional[str] = None, gc_dev_shm: bool = False) -> st
     os.makedirs(path, exist_ok=False)
 
     if use_dev_shm:
-        with open(os.path.join(path, "owner.pid"), "wt") as f:
+        with open(os.path.join(path, "owner.pid"), "w") as f:
             f.write(str(os.getpid()))
 
     return path

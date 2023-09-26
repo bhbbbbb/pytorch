@@ -1,40 +1,22 @@
-ir_version: 4
+ir_version: 8
 producer_name: "pytorch"
 producer_version: "CURRENT_VERSION"
 graph {
   node {
-    input: "onnx::Pad_0"
-    output: "onnx::AveragePool_1"
-    name: "Pad_0"
-    op_type: "Pad"
-    attribute {
-      name: "mode"
-      s: "constant"
-      type: STRING
-    }
-    attribute {
-      name: "pads"
-      ints: 0
-      ints: 0
-      ints: 0
-      ints: 0
-      ints: 0
-      ints: 0
-      ints: 0
-      ints: 0
-      type: INTS
-    }
-    attribute {
-      name: "value"
-      f: 0
-      type: FLOAT
-    }
-  }
-  node {
-    input: "onnx::AveragePool_1"
-    output: "2"
-    name: "AveragePool_1"
+    input: "onnx::AveragePool_0"
+    output: "1"
+    name: "AveragePool_0"
     op_type: "AveragePool"
+    attribute {
+      name: "ceil_mode"
+      i: 0
+      type: INT
+    }
+    attribute {
+      name: "count_include_pad"
+      i: 1
+      type: INT
+    }
     attribute {
       name: "kernel_shape"
       ints: 3
@@ -56,9 +38,9 @@ graph {
       type: INTS
     }
   }
-  name: "torch_jit"
+  name: "main_graph"
   input {
-    name: "onnx::Pad_0"
+    name: "onnx::AveragePool_0"
     type {
       tensor_type {
         elem_type: 1
@@ -80,7 +62,7 @@ graph {
     }
   }
   output {
-    name: "2"
+    name: "1"
     type {
       tensor_type {
         elem_type: 1
@@ -103,5 +85,5 @@ graph {
   }
 }
 opset_import {
-  version: 9
+  version: 17
 }

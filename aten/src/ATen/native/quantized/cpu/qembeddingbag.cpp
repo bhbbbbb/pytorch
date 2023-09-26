@@ -1,5 +1,6 @@
-#include <ATen/ATen.h>
-#include <ATen/native/quantized/cpu/embedding_packed_params.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
+#include <ATen/native/quantized/cpu/EmbeddingPackedParams.h>
 #include <ATen/native/quantized/cpu/fbgemm_utils.h>
 #include <ATen/native/quantized/cpu/qembeddingbag.h>
 #include <torch/library.h>
@@ -9,7 +10,19 @@
 #endif
 
 #include <ATen/Parallel.h>
+#include <ATen/Utils.h>
 #include <c10/util/irange.h>
+
+#include <array>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/arange.h>
+#include <ATen/ops/empty.h>
+#include <ATen/ops/resize_native.h>
+#endif
 
 int register_embedding_params();
 
@@ -95,18 +108,38 @@ at::Tensor& embedding_lookup_fallback_impl(
         const uint8_t* scale_bias =
             weight_data + (idx + 1) * weight_size - 2 * sizeof(float);
         uint32_t scale_val_int32 = 0;
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         scale_val_int32 = scale_val_int32 |
           (scale_bias[0]) |
           (scale_bias[1] << 8) |
           (scale_bias[2] << 16) |
           (scale_bias[3] << 24);
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        scale_val_int32 = scale_val_int32 |
+          (scale_bias[3]) |
+          (scale_bias[2] << 8) |
+          (scale_bias[1] << 16) |
+          (scale_bias[0] << 24);
+#else
+#error Unexpected or undefined __BYTE_ORDER__
+#endif
         float scale_val = (reinterpret_cast<float*>(&scale_val_int32))[0];
         uint32_t bias_val_int32 = 0;
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         bias_val_int32 = bias_val_int32 |
           (scale_bias[4]) |
           (scale_bias[5] << 8) |
           (scale_bias[6] << 16) |
           (scale_bias[7] << 24);
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        bias_val_int32 = bias_val_int32 |
+          (scale_bias[7]) |
+          (scale_bias[6] << 8) |
+          (scale_bias[5] << 16) |
+          (scale_bias[4] << 24);
+#else
+#error Unexpected or undefined __BYTE_ORDER__
+#endif
         float bias_val = (reinterpret_cast<float*>(&bias_val_int32))[0];
         scale = weight_val * scale_val;
         bias = weight_val * bias_val;
@@ -114,14 +147,30 @@ at::Tensor& embedding_lookup_fallback_impl(
         const uint8_t* scale_bias =
             weight_data + (idx + 1) * weight_size - 2 * sizeof(at::Half);
         uint16_t scale_val_int16 = 0;
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         scale_val_int16 = scale_val_int16 |
           (scale_bias[0]) |
           (scale_bias[1] << 8);
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        scale_val_int16 = scale_val_int16 |
+          (scale_bias[1]) |
+          (scale_bias[0] << 8);
+#else
+#error Unexpected or undefined __BYTE_ORDER__
+#endif
         at::Half scale_val = (reinterpret_cast<at::Half*>(&scale_val_int16))[0];
         uint16_t bias_val_int16 = 0;
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         bias_val_int16 = bias_val_int16 |
           (scale_bias[2]) |
           (scale_bias[3] << 8);
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        bias_val_int16 = bias_val_int16 |
+          (scale_bias[3]) |
+          (scale_bias[2] << 8);
+#else
+#error Unexpected or undefined __BYTE_ORDER__
+#endif
         at::Half bias_val = (reinterpret_cast<at::Half*>(&bias_val_int16))[0];
         scale = weight_val * scale_val;
         bias = weight_val * bias_val;
@@ -227,14 +276,23 @@ at::Tensor& embedding_bag_nbit_impl(
     offsets_include_last_val[M] = indices.numel();
     offsets_data = offsets_include_last_val.data();
   }
-  std::vector<int64_t> shape;
-  if(indices.dim() == 2 && is_embedding_op) {
-    const auto indices_sizes = indices.sizes();
-    shape = {indices_sizes[0], indices_sizes[1], D};
-  } else {
-    shape = {output_size, D};
+  {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
+    std::array<int64_t, 3> shape_arr;
+    c10::IntArrayRef shape;
+    if(indices.dim() == 2 && is_embedding_op) {
+      const auto indices_sizes = indices.sizes();
+      shape_arr[0] = indices_sizes[0];
+      shape_arr[1] = indices_sizes[1];
+      shape_arr[2] = D;
+      shape = shape_arr;
+    } else {
+      shape_arr[0] = output_size;
+      shape_arr[1] = D;
+      shape = c10::IntArrayRef(&shape_arr[0], 2);
+    }
+    at::native::resize_(output, shape, c10::nullopt);
   }
-  at::native::resize_(output, shape, c10::nullopt);
 #ifdef USE_FBGEMM
   const auto indices_data = indices.data_ptr<IndexType>();
   const auto weight_data = weight.data_ptr<uint8_t>();
@@ -388,14 +446,23 @@ at::Tensor& embedding_bag_byte_impl(
     offsets_include_last_val[M] = indices.numel();
     offsets_data = offsets_include_last_val.data();
   }
-  std::vector<int64_t> shape;
-  if (indices.dim() == 2 && is_embedding_op) {
-    const auto indices_sizes = indices.sizes();
-    shape = {indices_sizes[0], indices_sizes[1], D};
-  } else {
-    shape = {output_size, D};
+  {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
+    std::array<int64_t, 3> shape_arr;
+    c10::IntArrayRef shape;
+    if (indices.dim() == 2 && is_embedding_op) {
+      const auto indices_sizes = indices.sizes();
+      shape_arr[0] = indices_sizes[0];
+      shape_arr[1] = indices_sizes[1];
+      shape_arr[2] = D;
+      shape = shape_arr;
+    } else {
+      shape_arr[0] = output_size;
+      shape_arr[1] = D;
+      shape = c10::IntArrayRef(&shape_arr[0], 2);
+    }
+    at::native::resize_(output, shape, c10::nullopt);
   }
-  at::native::resize_(output, shape, c10::nullopt);
 #ifdef USE_FBGEMM
   const int64_t N = weight_sizes[0];
   const auto weight_data = weight.data_ptr<uint8_t>();
@@ -405,7 +472,7 @@ at::Tensor& embedding_bag_byte_impl(
 
   if (!pruned_weights || fallback_to_no_sparse) {
     auto kernel_i8 =
-        fbgemm::GenerateEmbeddingSpMDM<uint8_t, IndexType, OffsetType>(
+        fbgemm::GenerateEmbeddingSpMDM<uint8_t, IndexType, OffsetType, /*OutType=*/float, /*TRHEAD_LOCAL=*/true>(
             /*block_size=*/D,
             /*has_weight=*/per_sample_weights_.has_value(),
             /*normalize_by_lengths=*/false,
@@ -806,7 +873,7 @@ Tensor& embedding_bag_4bit_rowwise_offsets_out(
       false);
 }
 
-Tensor& embedding_bag_2bit_rowwise_offsets_out(
+static Tensor& embedding_bag_2bit_rowwise_offsets_out(
     Tensor& output,
     const Tensor& weight,
     const Tensor& indices,
@@ -926,6 +993,45 @@ Tensor embedding_bag_2bit_rowwise_offsets(
   return output;
 }
 
+Tensor embedding_bag_byte_rowwise_offsets_meta(
+    const Tensor& weight,
+    const Tensor& indices,
+    const c10::optional<Tensor>& offsets_in,
+    const bool /* scale_grad_by_freq */,
+    const int64_t /* mode */,
+    bool /* pruned_weights */,
+    const c10::optional<Tensor>& /* per_sample_weights_ */,
+    const c10::optional<Tensor>& /* compressed_indices_mapping */,
+    bool include_last_offset) {
+  TORCH_CHECK(
+      indices.dim() == 1 || indices.dim() == 2,
+      "quantized::embedding_bag_byte_rowwise_offsets_meta operator supports 1 or 2d indices, got ",
+      indices.dim());
+
+  TORCH_CHECK(
+      offsets_in.has_value(),
+      "Currently quantized::embedding_bag_byte_rowwise_offsets_meta only supports having offsets.");
+  c10::MaybeOwned<at::Tensor> offsets =
+      c10::MaybeOwned<at::Tensor>::borrowed(offsets_in.value());
+
+  TORCH_CHECK(
+      indices.scalar_type() == at::kInt || indices.scalar_type() == at::kLong,
+      "Expect 32 or 64 bit indices, but found ",
+      indices.scalar_type(),
+      " instead.");
+  TORCH_CHECK(
+      offsets->scalar_type() == at::kInt || offsets->scalar_type() == at::kLong,
+      "Expect 32 or 64 bit offsets, but found ",
+      offsets->scalar_type(),
+      " instead.");
+
+  const auto D = weight.sym_size(1) - 8; // NB: -8 to account for scale and bias
+  const auto M = offsets->sym_size(0);
+  const auto output_size = include_last_offset ? M - 1 : M;
+
+  return at::empty_symint({output_size, D}, weight.options().dtype(at::kFloat));
+}
+
 template <int bit_rate>
 class QEmbeddingBag final {
  public:
@@ -1029,6 +1135,13 @@ TORCH_LIBRARY_IMPL(quantized, CPU, m) {
       TORCH_SELECTIVE_NAME("quantized::embedding_bag_2bit_rowwise_offsets"),
       embedding_bag_2bit_rowwise_offsets);
 }
+
+TORCH_LIBRARY_IMPL(quantized, Meta, m) {
+  m.impl(
+      "quantized::embedding_bag_byte_rowwise_offsets",
+      embedding_bag_byte_rowwise_offsets_meta);
+}
+
 } // namespace
 } // namespace native
 } // namespace at

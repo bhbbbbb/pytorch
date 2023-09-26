@@ -1,5 +1,4 @@
 import argparse
-import concurrent.futures
 import json
 import logging
 import os
@@ -8,7 +7,7 @@ import subprocess
 import sys
 import time
 from enum import Enum
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Pattern
+from typing import Any, Dict, List, NamedTuple, Optional, Pattern, Set
 
 
 IS_WINDOWS: bool = os.name == "nt"
@@ -82,7 +81,7 @@ DOCUMENTED_IN_FLAKE8RULES: Set[str] = {
 DOCUMENTED_IN_FLAKE8COMPREHENSIONS: Set[str] = {
     "C400", "C401", "C402", "C403", "C404", "C405", "C406", "C407", "C408", "C409",
     "C410",
-    "C411", "C412", "C413", "C413", "C414", "C415", "C416",
+    "C411", "C412", "C413", "C414", "C415", "C416",
 }
 
 # https://github.com/PyCQA/flake8-bugbear#list-of-warnings
@@ -149,8 +148,7 @@ def _run_command(
     try:
         return subprocess.run(
             args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=True,
             encoding="utf-8",
         )
@@ -244,16 +242,15 @@ def get_issue_documentation_url(code: str) -> str:
     return ""
 
 
-def check_file(
-    filename: str,
-    binary: str,
+def check_files(
+    filenames: List[str],
     flake8_plugins_path: Optional[str],
     severities: Dict[str, LintSeverity],
     retries: int,
 ) -> List[LintMessage]:
     try:
         proc = run_command(
-            [binary, "--exit-zero", filename],
+            [sys.executable, "-mflake8", "--exit-zero"] + filenames,
             extra_env={"FLAKE8_PLUGINS_PATH": flake8_plugins_path}
             if flake8_plugins_path
             else None,
@@ -262,7 +259,7 @@ def check_file(
     except (OSError, subprocess.CalledProcessError) as err:
         return [
             LintMessage(
-                path=filename,
+                path=None,
                 line=None,
                 char=None,
                 code="FLAKE8",
@@ -292,10 +289,7 @@ def check_file(
         LintMessage(
             path=match["file"],
             name=match["code"],
-            description="{}\nSee {}".format(
-                match["message"],
-                get_issue_documentation_url(match["code"]),
-            ),
+            description=f"{match['message']}\nSee {get_issue_documentation_url(match['code'])}",
             line=int(match["line"]),
             char=int(match["column"])
             if match["column"] is not None and not match["column"].startswith("-")
@@ -313,11 +307,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Flake8 wrapper linter.",
         fromfile_prefix_chars="@",
-    )
-    parser.add_argument(
-        "--binary",
-        required=True,
-        help="flake8 binary path",
     )
     parser.add_argument(
         "--flake8-plugins-path",
@@ -369,28 +358,11 @@ def main() -> None:
             assert len(parts) == 2, f"invalid severity `{severity}`"
             severities[parts[0]] = LintSeverity(parts[1])
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=os.cpu_count(),
-        thread_name_prefix="Thread",
-    ) as executor:
-        futures = {
-            executor.submit(
-                check_file,
-                filename,
-                args.binary,
-                flake8_plugins_path,
-                severities,
-                args.retries,
-            ): filename
-            for filename in args.filenames
-        }
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                for lint_message in future.result():
-                    print(json.dumps(lint_message._asdict()), flush=True)
-            except Exception:
-                logging.critical('Failed at "%s".', futures[future])
-                raise
+    lint_messages = check_files(
+        args.filenames, flake8_plugins_path, severities, args.retries
+    )
+    for lint_message in lint_messages:
+        print(json.dumps(lint_message._asdict()), flush=True)
 
 
 if __name__ == "__main__":

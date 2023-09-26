@@ -1,12 +1,17 @@
-#include <ATen/ATen.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/native/cuda/Resize.h>
+#include <ATen/core/Tensor.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/PeerToPeerAccess.h>
-#include <torch/library.h>
-#include <ATen/native/cuda/Resize.h>
 #include <ATen/native/ResizeCommon.h>
 
-namespace at {
-namespace native {
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/resize_native.h>
+#endif
+
+namespace at::native {
 
 void resize_bytes_cuda(StorageImpl* storage, size_t size_bytes) {
   TORCH_CHECK(storage->resizable(), "Trying to resize storage that is not resizable");
@@ -48,6 +53,7 @@ const Tensor& resize_cuda_(
     return resize_named_tensor_(self, size, optional_memory_format);
   }
   auto* self_ = self.unsafeGetTensorImpl();
+  int64_t old_storage_nbytes = self_->unsafe_storage() ? self_->unsafe_storage().nbytes() : 0;
   resize_impl_cuda_(self_, size, /*strides=*/c10::nullopt);
   if (optional_memory_format.has_value()) {
     auto memory_format =
@@ -58,7 +64,10 @@ const Tensor& resize_cuda_(
         memory_format);
     self_->empty_tensor_restride(memory_format);
   }
+  // See Note [Enabling Deterministic Operations]
+  if (C10_UNLIKELY(at::globalContext().deterministicAlgorithms())) {
+    at::native::fill_resize_deterministic_(self, old_storage_nbytes);
+  }
   return self;
 }
-} // namespace native
-} // namespace at
+} // namespace at::native

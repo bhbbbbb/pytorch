@@ -1,8 +1,7 @@
 from cimodel.lib.conf_tree import ConfigNode
 
 
-CONFIG_TREE_DATA = [
-]
+CONFIG_TREE_DATA = []
 
 
 def get_major_pyver(dotted_version):
@@ -12,7 +11,7 @@ def get_major_pyver(dotted_version):
 
 class TreeConfigNode(ConfigNode):
     def __init__(self, parent, node_name, subtree):
-        super(TreeConfigNode, self).__init__(parent, self.modify_label(node_name))
+        super().__init__(parent, self.modify_label(node_name))
         self.subtree = subtree
         self.init2(node_name)
 
@@ -28,7 +27,7 @@ class TreeConfigNode(ConfigNode):
 
 class TopLevelNode(TreeConfigNode):
     def __init__(self, node_name, subtree):
-        super(TopLevelNode, self).__init__(None, node_name, subtree)
+        super().__init__(None, node_name, subtree)
 
     # noinspection PyMethodMayBeStatic
     def child_constructor(self):
@@ -71,10 +70,11 @@ class ExperimentalFeatureConfigNode(TreeConfigNode):
         next_nodes = {
             "asan": AsanConfigNode,
             "xla": XlaConfigNode,
-            "mlc": MLCConfigNode,
+            "mps": MPSConfigNode,
             "vulkan": VulkanConfigNode,
             "parallel_tbb": ParallelTBBConfigNode,
-            "noarch": NoarchConfigNode,
+            "crossref": CrossRefConfigNode,
+            "dynamo": DynamoConfigNode,
             "parallel_native": ParallelNativeConfigNode,
             "onnx": ONNXConfigNode,
             "libtorch": LibTorchConfigNode,
@@ -94,6 +94,7 @@ class SlowGradcheckConfigNode(TreeConfigNode):
 
     def child_constructor(self):
         return ExperimentalFeatureConfigNode
+
 
 class PureTorchConfigNode(TreeConfigNode):
     def modify_label(self, label):
@@ -116,12 +117,13 @@ class XlaConfigNode(TreeConfigNode):
     def child_constructor(self):
         return ImportantConfigNode
 
-class MLCConfigNode(TreeConfigNode):
+
+class MPSConfigNode(TreeConfigNode):
     def modify_label(self, label):
-        return "MLC=" + str(label)
+        return "MPS=" + str(label)
 
     def init2(self, node_name):
-        self.props["is_mlc"] = node_name
+        self.props["is_mps"] = node_name
 
     def child_constructor(self):
         return ImportantConfigNode
@@ -171,9 +173,17 @@ class ParallelTBBConfigNode(TreeConfigNode):
         return ImportantConfigNode
 
 
-class NoarchConfigNode(TreeConfigNode):
+class CrossRefConfigNode(TreeConfigNode):
     def init2(self, node_name):
-        self.props["is_noarch"] = node_name
+        self.props["is_crossref"] = node_name
+
+    def child_constructor(self):
+        return ImportantConfigNode
+
+
+class DynamoConfigNode(TreeConfigNode):
+    def init2(self, node_name):
+        self.props["is_dynamo"] = node_name
 
     def child_constructor(self):
         return ImportantConfigNode
@@ -245,8 +255,11 @@ class XenialCompilerConfigNode(TreeConfigNode):
 
     # noinspection PyMethodMayBeStatic
     def child_constructor(self):
-
-        return XenialCompilerVersionConfigNode if self.props["compiler_name"] else PyVerConfigNode
+        return (
+            XenialCompilerVersionConfigNode
+            if self.props["compiler_name"]
+            else PyVerConfigNode
+        )
 
 
 class BionicCompilerConfigNode(TreeConfigNode):
@@ -258,8 +271,11 @@ class BionicCompilerConfigNode(TreeConfigNode):
 
     # noinspection PyMethodMayBeStatic
     def child_constructor(self):
-
-        return BionicCompilerVersionConfigNode if self.props["compiler_name"] else PyVerConfigNode
+        return (
+            BionicCompilerVersionConfigNode
+            if self.props["compiler_name"]
+            else PyVerConfigNode
+        )
 
 
 class XenialCompilerVersionConfigNode(TreeConfigNode):

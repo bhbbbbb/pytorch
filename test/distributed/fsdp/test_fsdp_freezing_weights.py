@@ -10,17 +10,13 @@ from torch import distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.nn.parallel import DistributedDataParallel
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
-from torch.testing._internal.common_fsdp import (
-    FSDPTest,
-    get_full_params,
-)
+from torch.testing._internal.common_fsdp import FSDPTest, get_full_params
 from torch.testing._internal.common_utils import (
-    TEST_WITH_DEV_DBG_ASAN,
     instantiate_parametrized_tests,
     parametrize,
     run_tests,
+    TEST_WITH_DEV_DBG_ASAN,
 )
-
 
 if not dist.is_available():
     print("Distributed not available, skipping tests", file=sys.stderr)
@@ -134,12 +130,8 @@ class TestFreezingWeights(FSDPTest):
             optimizer.zero_grad()
             fake_loss.backward()
             if freezing_method == FreezingMethod.GradToNone:
-                if with_fsdp:
-                    for param in model.module.module.trunk.parameters():
-                        param.grad = None
-                else:
-                    for param in model.module.trunk.parameters():
-                        param.grad = None
+                for param in model.module.trunk.parameters():
+                    param.grad = None
             optimizer.step()
 
         if with_fsdp:
@@ -172,6 +164,10 @@ class TestFreezingWeights(FSDPTest):
             exact_device=True,
             msg="FullyShardedDataParallel states didn't match PyTorch DDP states",
         )
+
+        if freezing_method == FreezingMethod.RequiresGrad:
+            for ddp_param, fsdp_param in zip(ddp_state, fsdp_state):
+                self.assertEqual(ddp_param.requires_grad, fsdp_param.requires_grad)
 
 
 instantiate_parametrized_tests(TestFreezingWeights)

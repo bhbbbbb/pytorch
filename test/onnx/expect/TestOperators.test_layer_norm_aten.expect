@@ -1,4 +1,4 @@
-ir_version: 4
+ir_version: 8
 producer_name: "pytorch"
 producer_version: "CURRENT_VERSION"
 graph {
@@ -7,35 +7,20 @@ graph {
     input: "weight"
     input: "bias"
     output: "3"
-    op_type: "ATen"
+    name: "LayerNormalization_0"
+    op_type: "LayerNormalization"
     attribute {
-      name: "cudnn_enable"
-      i: 1
+      name: "axis"
+      i: -2
       type: INT
     }
     attribute {
-      name: "eps"
+      name: "epsilon"
       f: 1e-05
       type: FLOAT
     }
-    attribute {
-      name: "normalized_shape"
-      ints: 10
-      ints: 10
-      type: INTS
-    }
-    attribute {
-      name: "operator"
-      s: "layer_norm"
-      type: STRING
-    }
-    attribute {
-      name: "overload_name"
-      s: ""
-      type: STRING
-    }
   }
-  name: "torch_jit"
+  name: "main_graph"
   initializer {
     dims: 10
     dims: 10
@@ -128,5 +113,5 @@ graph {
   }
 }
 opset_import {
-  version: 9
+  version: 17
 }

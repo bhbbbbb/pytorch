@@ -1,20 +1,33 @@
-#include <ATen/ATen.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
 #include <ATen/ceil_div.h>
+#include <ATen/Dispatch.h>
 #include <ATen/cuda/Atomic.cuh>
 #include <ATen/cuda/detail/IndexUtils.cuh>
 #include <ATen/cuda/CUDAContext.h>
-#include <ATen/NativeFunctions.h>
 #include <ATen/TensorUtils.h>
 #include <ATen/Utils.h>
 #include <c10/util/Exception.h>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/empty_like.h>
+#include <ATen/ops/replication_pad1d_native.h>
+#include <ATen/ops/replication_pad1d_backward_native.h>
+#include <ATen/ops/replication_pad2d_native.h>
+#include <ATen/ops/replication_pad2d_backward_native.h>
+#include <ATen/ops/replication_pad3d_native.h>
+#include <ATen/ops/replication_pad3d_backward_native.h>
+#endif
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
 
 
-namespace at {
-namespace native {
+namespace at::native {
 __host__ __device__ __forceinline__ int imin(int a, int b) {
   return a > b ? b : a;
 }
@@ -290,46 +303,6 @@ void replication_pad2d_backward_out_cuda_template(
   );
 }
 
-static inline void shapeCheck3d(
-    const Tensor& input,
-    int pleft, int pright,
-    int ptop, int pbottom,
-    int pfront, int pback) {
-  TORCH_CHECK(at::cuda::detail::canUse32BitIndexMath(input),
-      "input tensor must fit into 32-bit index math");
-  int numInputDims = input.dim();
-
-  bool valid_dims = input.size(1) != 0 && input.size(2) != 0 && input.size(3) != 0;
-  TORCH_CHECK(
-       (numInputDims == 4 && input.size(0) != 0 && valid_dims) ||
-       (numInputDims == 5 && valid_dims && input.size(4) != 0),
-       "Expected 4D or 5D (batch mode) tensor with possibly 0 batch size and other non-zero dimensions for input, but got: ",
-       input.sizes());
-
-  int planeDim = 0;
-  int dimd = 1;
-  int dimh = 2;
-  int dimw = 3;
-  if (numInputDims == 5) {
-    planeDim++;
-    dimd++;
-    dimh++;
-    dimw++;
-  }
-
-  const int idepth = input.size(dimd);
-  const int iheight = input.size(dimh);
-  const int iwidth = input.size(dimw);
-  const int odepth = idepth + pfront + pback;
-  const int oheight = iheight + ptop + pbottom;
-  const int owidth  = iwidth + pleft + pright;
-  TORCH_CHECK(owidth >= 1 || oheight >= 1 || odepth >= 1,
-      "input (D: ", idepth, " H: ", iheight, ", W: ", iwidth,
-      ") is too small."
-      " Calculated output D: ", odepth, " H: ", oheight, " W: ", owidth);
-
-}
-
 static inline void shapeAndGradOutputCheck3d(
     const Tensor& input,
     const Tensor& gradOutput,
@@ -476,7 +449,7 @@ TORCH_IMPL_FUNC(replication_pad1d_out_cuda) (
     return;
   }
 
-  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND1(kHalf,
+  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND(kHalf,
     input.scalar_type(), "replication_pad1d_cuda", [&] {
       at::Tensor input_ = input;
       at::Tensor output_ = output;
@@ -584,7 +557,7 @@ TORCH_IMPL_FUNC(replication_pad2d_out_cuda) (
   // const auto padR = paddingSize[1]; // This padding is ignored here
   const auto padT = paddingSize[2];
   // const auto padB = paddingSize[3]; // This padding is ignored here
-  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND1(kHalf,
+  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND(kHalf,
     input.scalar_type(), "replication_pad2d_cuda", [&] {
       at::Tensor input_ = input;
       at::Tensor output_ = output;
@@ -676,7 +649,7 @@ TORCH_IMPL_FUNC(replication_pad3d_out_cuda) (
     return;
   }
 
-  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND1(kHalf,
+  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND(kHalf,
     input.scalar_type(), "replication_pad3d_cuda", [&] {
       at::Tensor input_ = input;
       at::Tensor output_ = output;
@@ -737,4 +710,3 @@ Tensor replication_pad3d_backward_cuda(
 }
 
 } // at::native
-} // at

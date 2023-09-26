@@ -1,10 +1,11 @@
 import itertools
-from typing_extensions import Protocol
 import warnings
+from typing import Protocol
 
 import torch
 from ..parameter import is_lazy
 
+__all__ = ['LazyModuleMixin']
 
 class _LazyProtocol(Protocol):
     """This is to avoid errors with mypy checks for
@@ -14,7 +15,7 @@ class _LazyProtocol(Protocol):
     def _register_load_state_dict_pre_hook(self, hook):
         ...
 
-    def register_forward_pre_hook(self, hook):
+    def register_forward_pre_hook(self, hook, *, prepend=False, with_kwargs=False):
         ...
 
     def _lazy_load_hook(
@@ -73,6 +74,7 @@ class LazyModuleMixin:
     These "dry runs" send inputs of the correct size, dtype, and device through
     the network and to each one of its lazy modules. After this the network can be used as usual.
 
+    >>> # xdoctest: +SKIP
     >>> class LazyMLP(torch.nn.Module):
     ...    def __init__(self):
     ...        super().__init__()
@@ -89,7 +91,7 @@ class LazyModuleMixin:
     >>> lazy_mlp = LazyMLP()
     >>> # transforms the network's device and dtype
     >>> # NOTE: these transforms can and should be applied after construction and before any 'dry runs'
-    >>> lazy_mlp = mlp.cuda().double()
+    >>> lazy_mlp = lazy_mlp.cuda().double()
     >>> lazy_mlp
     LazyMLP( (fc1): LazyLinear(in_features=0, out_features=10, bias=True)
       (relu1): ReLU()
@@ -174,7 +176,7 @@ class LazyModuleMixin:
         # Mypy doesnt like this super call in a mixin
         super().__init__(*args, **kwargs)  # type: ignore[misc]
         self._load_hook = self._register_load_state_dict_pre_hook(self._lazy_load_hook)
-        self._initialize_hook = self.register_forward_pre_hook(self._infer_parameters)
+        self._initialize_hook = self.register_forward_pre_hook(self._infer_parameters, with_kwargs=True)
         warnings.warn('Lazy modules are a new feature under heavy development '
                       'so changes to the API or functionality can happen at any moment.')
 
@@ -221,7 +223,7 @@ class LazyModuleMixin:
         This adds an interface to isolate parameter initialization from the
         forward pass when doing parameter shape inference.
         """
-        raise NotImplementedError('initialize_parameters is not implemented for {}'.format(self.__class__.__name__))
+        raise NotImplementedError(f'initialize_parameters is not implemented for {self.__class__.__name__}')
 
     def has_uninitialized_params(self: _LazyProtocol):
         r"""Check if a module has parameters that are not initialized
@@ -235,7 +237,7 @@ class LazyModuleMixin:
                 return True
         return False
 
-    def _infer_parameters(self: _LazyProtocol, module, input):
+    def _infer_parameters(self: _LazyProtocol, module, args, kwargs=None):
         r"""Infers the size and initializes the parameters according to the
         provided input batch.
         Given a module that contains parameters that were declared inferrable
@@ -245,9 +247,10 @@ class LazyModuleMixin:
         The module is set into evaluation mode before running the forward pass in order
         to avoid saving statistics or calculating gradients
         """
-        module.initialize_parameters(*input)
+        kwargs = kwargs if kwargs else {}
+        module.initialize_parameters(*args, **kwargs)
         if module.has_uninitialized_params():
-            raise RuntimeError('module {} has not been fully initialized'.format(self._get_name()))
+            raise RuntimeError(f'module {self._get_name()} has not been fully initialized')
         module._initialize_hook.remove()
         module._load_hook.remove()
         delattr(module, '_initialize_hook')

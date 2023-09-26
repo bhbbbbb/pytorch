@@ -1,6 +1,5 @@
 #pragma once
 
-#include <c10/util/variant.h>
 #include <torch/csrc/jit/ir/ir.h>
 #include <torch/csrc/jit/passes/symbolic_shape_runtime_fusion.h>
 #include <torch/csrc/jit/passes/utils/subgraph_utils.h>
@@ -24,6 +23,10 @@ struct SmallSizeTPairHash {
 
 // Returns true if the TE fuser supports this conv2d.
 bool conv2dIsSupportedJit(const Node* node);
+// Returns true if the TE fuser supports this conv2d with mkldnn prepacked conv.
+bool mkldnnPrepackedConvIsSupportedJit(const Node* node);
+// Returns true if the TE _convolution node is Conv2d.
+bool isConv2d(const Node* node);
 // Returns true if the TE fuser supports this matmul.
 bool matmulIsSupported(const Node* node);
 template <typename T>
@@ -55,23 +58,23 @@ std::vector<ExprHandle> computeIndicesToBroadcast(
     const std::vector<ExprHandle>& inputSizes);
 
 inline std::string getArgValueName(const ArgValue& a) {
-  if (c10::get_if<tensorexpr::BufHandle>(&a)) {
+  if (std::holds_alternative<tensorexpr::BufHandle>(a)) {
     return "BufHandle";
-  } else if (c10::get_if<tensorexpr::VarHandle>(&a)) {
+  } else if (std::holds_alternative<tensorexpr::VarHandle>(a)) {
     return "VarHandle";
-  } else if (c10::get_if<double>(&a)) {
+  } else if (std::holds_alternative<double>(a)) {
     return "double";
-  } else if (c10::get_if<int64_t>(&a)) {
+  } else if (std::holds_alternative<int64_t>(a)) {
     return "int64_t";
-  } else if (c10::get_if<bool>(&a)) {
+  } else if (std::holds_alternative<bool>(a)) {
     return "bool";
-  } else if (c10::get_if<BufList>(&a)) {
+  } else if (std::holds_alternative<BufList>(a)) {
     return "BufList";
-  } else if (c10::get_if<DoubleList>(&a)) {
+  } else if (std::holds_alternative<DoubleList>(a)) {
     return "DoubleList";
-  } else if (c10::get_if<IntList>(&a)) {
+  } else if (std::holds_alternative<IntList>(a)) {
     return "IntList";
-  } else if (c10::get_if<ArgNone>(&a)) {
+  } else if (std::holds_alternative<ArgNone>(a)) {
     return "None";
   } else {
     throw std::runtime_error("ArgValue type not handled in string conversion");
@@ -82,7 +85,7 @@ template <class T>
 std::vector<T> convertVecArgValue(const std::vector<ArgValue>& v) {
   std::vector<T> res;
   for (auto& x : v) {
-    auto val = c10::get_if<T>(&x);
+    auto val = std::get_if<T>(&x);
     if (val) {
       res.push_back(*val);
     } else {
@@ -99,7 +102,7 @@ class TORCH_API TensorExprKernel {
     BufPtr buf;
     // Only one of ptr and node is used at a time
     // 1) ptr for the constant tensors
-    // 2) node for the constant custom class ojects
+    // 2) node for the constant custom class objects
     void* ptr = nullptr;
     Node* node = nullptr;
   };
@@ -194,6 +197,11 @@ class TORCH_API TensorExprKernel {
     kBlockCodeGen,
   };
 
+  enum MemoryLayoutPolicy {
+    kContiguous,
+    kChannelsLastNdContiguous,
+  };
+
   void compile();
   void genInputDebugNames();
   void runKernel(Stack& stack) const;
@@ -230,6 +238,19 @@ class TORCH_API TensorExprKernel {
 
   Tensor bindInput(const torch::jit::Value* input);
   BlockPtr bindAllInputs();
+
+  // Deduce the memory layout policy to be propagated within
+  // NNC fusion group. The memory layout policy could be `kContiguous`
+  // or `kChannelsLastNdContiguous`.
+  //    `kContiguous`: Always convert the non-contiguous input tensors and
+  //        internal buffers to contiguous.
+  //    `kChannelsLastNdContiguous`: Always convert the input tensors and
+  //        internal buffers to channels-last contiguous.
+  // Currently, the rule is simple.
+  //    If all the input and out tensors of NNC fusion group are channels-last
+  //    contiguous, the policy is `kChannelsLastNdContiguous`. Otherwise, it
+  //    is always `kContiguous`.
+  void deduceMemoryLayoutPolicy();
 
   Tensor convertSymbolicOutputToCorrectStrides(torch::jit::Value* v);
   Tensor convertStaticShapeOutputToCorrectStrides(torch::jit::Value* v);
@@ -274,8 +295,13 @@ class TORCH_API TensorExprKernel {
   std::vector<ExprHandle> getInputStrides(
       const torch::jit::Value* input,
       const std::vector<ExprHandle>& inputTensorDims);
-  std::vector<torch::jit::StrideInput>& getSymbolicInputStrideDesc(
+  std::vector<torch::jit::StrideInput>& getSymbolicStrideDesc(
       const torch::jit::Value* value);
+
+  // Apply the optimizations to the graph owned by the current fusion group,
+  // like concatenation optimization, post-op fusion, and some other graph-level
+  // optimizations.
+  void optimizeOwningGraph();
 
   int64_t nInputs_ = 0;
   int64_t nOutputs_ = 0;
@@ -286,6 +312,7 @@ class TORCH_API TensorExprKernel {
   std::vector<bool> isOutputScalar_;
   std::vector<UnpackedTensorOptions> tensorOutputTensorOptions_;
   std::unordered_set<BufPtr> bufOutputs_;
+  std::unordered_set<BufPtr> bufsToBeParallelized_;
   std::unordered_map<const torch::jit::Value*, BufPtr> bufs_;
   std::unordered_map<const torch::jit::Value*, VarHandle> scalars_;
   std::unordered_map<const torch::jit::Value*, std::string> input_name_map_;
@@ -324,9 +351,13 @@ class TORCH_API TensorExprKernel {
   // map from <input index, tensor dimension> to stride as arg VarHandle
   std::unordered_map<std::pair<size_t, size_t>, VarHandle, SmallSizeTPairHash>
       strideArgToVar_;
-  std::unordered_map<size_t, std::vector<torch::jit::StrideInput>>
-      sym_stride_inputs_;
-  std::unordered_map<size_t, torch::jit::StrideInput> sym_stride_outputs_;
+  std::unordered_map<
+      const torch::jit::Value*,
+      std::vector<torch::jit::StrideInput>>
+      symbolic_strides_;
+
+  // Memory layout to be propagated with fusion group
+  MemoryLayoutPolicy memory_layout_policy_ = MemoryLayoutPolicy::kContiguous;
 };
 
 TORCH_API int& getTECudaPointwiseLoopLevels();
@@ -341,6 +372,10 @@ TORCH_API bool& getOptConditionals();
 
 TORCH_API c10::optional<at::Device> pickDeviceType(
     const at::ArrayRef<torch::jit::Value*>& inputs);
+
+bool isContiguous(
+    const torch::jit::Value* v,
+    at::MemoryFormat memory_format = at::MemoryFormat::Contiguous);
 
 } // namespace tensorexpr
 } // namespace jit

@@ -1,9 +1,21 @@
-#include <ATen/ATen.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
 #include <ATen/Parallel.h>
-#include <ATen/native/quantized/cpu/embedding_packed_params.h>
+#include <ATen/native/quantized/cpu/EmbeddingPackedParams.h>
 #include <ATen/native/quantized/cpu/fbgemm_utils.h>
+#include <ATen/native/quantized/cpu/qembeddingbag.h>
 #include <c10/util/irange.h>
 #include <torch/library.h>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/_empty_per_channel_affine_quantized.h>
+#include <ATen/ops/empty.h>
+#include <ATen/ops/from_blob.h>
+#include <ATen/ops/resize_native.h>
+#endif
 
 int register_embedding_params();
 
@@ -90,9 +102,8 @@ at::Tensor PackedEmbeddingBagWeight::unpack() {
 
 namespace at {
 namespace native {
-namespace {
 
-Tensor qembeddingbag_byte_unpack(const Tensor& packed_weight) {
+Tensor& qembeddingbag_byte_unpack_out(Tensor& output, const Tensor& packed_weight) {
   // The "last" dimension of an N-Dimensioned batch of embedding bags is
   // quantization channel. E.g. for a 2D embedding bag, this has
   // [ row, col ] dimensions, for batched of embedding bags, dimensions might be
@@ -118,11 +129,9 @@ Tensor qembeddingbag_byte_unpack(const Tensor& packed_weight) {
 
   std::vector<int64_t> output_shape = packed_weight_sizes.vec();
   output_shape[col_dim] = output_columns;
-  at::Tensor output = at::empty(
-      output_shape,
-      packed_weight.options().dtype(kFloat),
-      packed_weight.suggest_memory_format());
-  float* output_data = output.data_ptr<float>();
+  at::native::resize_(output, output_shape);
+  auto output_contig = output.expect_contiguous();
+  float* output_data = output_contig->data_ptr<float>();
 
 #ifdef USE_FBGEMM
   at::parallel_for(0, input_rows, 1, [&](int64_t start_idx, int64_t end_idx) {
@@ -146,6 +155,31 @@ Tensor qembeddingbag_byte_unpack(const Tensor& packed_weight) {
   } // input_rows
 #endif // USE_FBGEMM
   return output;
+}
+
+namespace {
+Tensor qembeddingbag_byte_unpack(const Tensor& packed_weight) {
+  at::Tensor output = at::empty(
+      {},
+      packed_weight.options().dtype(kFloat),
+      packed_weight.suggest_memory_format());
+  qembeddingbag_byte_unpack_out(output, packed_weight);
+  return output;
+}
+
+Tensor qembeddingbag_byte_unpack_meta(const Tensor& packed_weight) {
+  const auto packed_weight_sizes = packed_weight.sym_sizes();
+  const auto col_dim = packed_weight_sizes.size() - 1;
+  const auto input_columns = packed_weight_sizes[col_dim];
+  // The last 2 values are used to store the FP32 scale and zero_point values
+  // per row.
+  const auto output_columns = input_columns - 2 * sizeof(float);
+
+  auto output_shape = packed_weight_sizes.vec();
+  output_shape[col_dim] = output_columns;
+
+  at::SymDimVector output_shape_vec(output_shape);
+  return at::empty_symint(output_shape_vec, packed_weight.options().dtype(kFloat), packed_weight.suggest_memory_format());
 }
 
 Tensor _qembeddingbag_nbit_unpack_helper(
@@ -250,6 +284,12 @@ TORCH_LIBRARY_IMPL(quantized, CatchAll, m) {
   m.impl(
       TORCH_SELECTIVE_NAME("quantized::embedding_bag_unpack"),
       TORCH_FN(QEmbeddingUnpackWeights::run));
+}
+
+TORCH_LIBRARY_IMPL(quantized, Meta, m) {
+  m.impl(
+      "quantized::embedding_bag_byte_unpack",
+      qembeddingbag_byte_unpack_meta);
 }
 
 } // namespace

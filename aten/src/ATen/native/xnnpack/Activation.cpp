@@ -1,11 +1,10 @@
 #ifdef USE_XNNPACK
 
 #include <ATen/native/xnnpack/Common.h>
+#include <ATen/native/xnnpack/Engine.h>
 #include <ATen/native/utils/Factory.h>
 
-namespace at {
-namespace native {
-namespace xnnpack {
+namespace at::native::xnnpack {
 
 
 bool use_hardswish(
@@ -18,7 +17,7 @@ bool use_hardswish(
            true;
 }
 
-Tensor& hardswish_impl(Tensor& input, Tensor& output) {
+static Tensor& hardswish_impl(Tensor& input, Tensor& output) {
   using namespace internal;
 
   xnn_operator_t hardswish_op{};
@@ -65,7 +64,7 @@ Tensor hardswish(const Tensor& input) {
     padded_input.sizes(),
     padded_input.options().dtype(),
     input.suggest_memory_format(),
-    padded_input.names());
+    padded_input.opt_names());
 
   hardswish_impl(padded_input, output);
   return output.contiguous(input.suggest_memory_format());
@@ -84,14 +83,12 @@ Tensor& hardswish_(Tensor& input) {
       padded_input.sizes(),
       padded_input.options().dtype(),
       input.suggest_memory_format(),
-      padded_input.names());
+      padded_input.opt_names());
     hardswish_impl(padded_input, output);
     return input.copy_(output);
   }
 }
 
-}
-}
-}
+} // namespace at::native::xnnpack
 
 #endif /* USE_XNNPACK */

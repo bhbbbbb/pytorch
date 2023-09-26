@@ -2,7 +2,11 @@
 #include "WorkersPool.h"
 #include "caffe2/core/logging.h"
 
+#if !defined(__s390x__)
 #include <cpuinfo.h>
+#else
+#include <thread>
+#endif
 
 C10_DEFINE_bool(
     caffe2_threadpool_force_inline,
@@ -41,6 +45,7 @@ namespace {
 }
 
 size_t getDefaultNumThreads() {
+#if !defined(__s390x__)
   CAFFE_ENFORCE(cpuinfo_initialize(), "cpuinfo initialization failed");
   int numThreads = cpuinfo_get_processors_count();
 
@@ -95,11 +100,26 @@ size_t getDefaultNumThreads() {
         break;
     }
   }
+#else
+  int numThreads = std::max<int>(std::thread::hardware_concurrency(), 1);
+#endif
 
   if (FLAGS_pthreadpool_size) {
     // Always give precedence to explicit setting.
     numThreads = FLAGS_pthreadpool_size;
   }
+
+  /*
+   * For llvm-tsan, holding limit for the number of locks for a single thread
+   * is 63 (because of comparison < 64 instead of <=). pthreadpool's worst
+   * case is the number of threads in a pool. So we want to limit the threadpool
+   * size to 64 when running with tsan. However, sometimes it is tricky to
+   * detect if we are running under tsan, for now capping the default
+   * threadcount to the tsan limit unconditionally.
+   */
+  int tsanThreadLimit = 63;
+  numThreads = std::min(numThreads, tsanThreadLimit);
+
   return numThreads;
 }
 

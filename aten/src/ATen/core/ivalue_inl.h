@@ -7,6 +7,7 @@
 
 #include <ATen/core/Dict.h>
 #include <ATen/core/List.h>
+#include <ATen/core/IListRef.h>
 #include <ATen/core/functional.h>
 #include <ATen/core/jit_type.h>
 #include <ATen/core/qualified_name.h>
@@ -21,6 +22,7 @@
 #include <c10/core/UndefinedTensorImpl.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
 #include <c10/util/FunctionRef.h>
+#include <c10/util/Logging.h>
 #include <c10/util/hash.h>
 #include <c10/util/intrusive_ptr.h>
 #include <c10/util/irange.h>
@@ -90,6 +92,14 @@ inline c10::intrusive_ptr<ivalue::Future> IValue::toFuture() && {
 inline c10::intrusive_ptr<ivalue::Future> IValue::toFuture() const& {
   AT_ASSERT(isFuture(), "Expected Future but got ", tagKind());
   return toIntrusivePtr<ivalue::Future>();
+}
+inline c10::intrusive_ptr<ivalue::Await> IValue::toAwait() && {
+  AT_ASSERT(isAwait(), "Expected Await but got ", tagKind());
+  return moveToIntrusivePtr<ivalue::Await>();
+}
+inline c10::intrusive_ptr<ivalue::Await> IValue::toAwait() const& {
+  AT_ASSERT(isAwait(), "Expected Await but got ", tagKind());
+  return toIntrusivePtr<ivalue::Await>();
 }
 inline c10::intrusive_ptr<c10::RRefInterface> IValue::toRRef() && {
   AT_ASSERT(isRRef(), "Expected RRef but got ", tagKind());
@@ -185,10 +195,18 @@ inline c10::Storage IValue::toStorage() const& {
   return c10::Storage(toIntrusivePtr<at::StorageImpl>());
 }
 inline c10::Stream IValue::toStream() && {
-  return c10::Stream::unpack(payload.u.as_int);
+  AT_ASSERT(isStream(), "Expected Stream but got ", tagKind());
+  auto ptr = toIntrusivePtr<ivalue::StreamData3Holder>();
+  return c10::Stream::unpack3((*ptr).val.stream_id,
+                              (*ptr).val.device_index,
+                              (*ptr).val.device_type);
 }
 inline c10::Stream IValue::toStream() const& {
-  return c10::Stream::unpack(payload.u.as_int);
+  AT_ASSERT(isStream(), "Expected Stream but got ", tagKind());
+  auto ptr = toIntrusivePtr<ivalue::StreamData3Holder>();
+  return c10::Stream::unpack3((*ptr).val.stream_id,
+                              (*ptr).val.device_index,
+                              (*ptr).val.device_type);
 }
 inline c10::intrusive_ptr<caffe2::Blob> IValue::toBlob() && {
   AT_ASSERT(isBlob(), "Expected Blob but got ", tagKind());
@@ -214,6 +232,55 @@ inline at::Generator IValue::toGenerator() && {
 inline at::Generator IValue::toGenerator() const& {
   AT_ASSERT(isGenerator(), "Expected Generator but got ", tagKind());
   return at::Generator(toIntrusivePtr<at::GeneratorImpl>());
+}
+inline c10::SymInt IValue::toSymInt() && {
+  AT_ASSERT(isSymInt() || isInt(), "Expected SymInt or int but got ", tagKind());
+  if (isSymInt()) {
+    return c10::SymInt(moveToIntrusivePtr<c10::SymNodeImpl>());
+  } else {
+    return c10::SymInt(payload.u.as_int);
+  }
+}
+inline c10::SymInt IValue::toSymInt() const& {
+  AT_ASSERT(isSymInt() || isInt(), "Expected SymInt or int but got ", tagKind());
+  if (isSymInt()) {
+    return c10::SymInt(toIntrusivePtr<c10::SymNodeImpl>());
+  } else {
+    return c10::SymInt(payload.u.as_int);
+  }
+}
+inline c10::SymFloat IValue::toSymFloat() && {
+  AT_ASSERT(isSymFloat() || isDouble(), "Expected SymFloat or double but got ", tagKind());
+  if (isSymFloat()) {
+    return c10::SymFloat(moveToIntrusivePtr<c10::SymNodeImpl>());
+  } else {
+    return c10::SymFloat(payload.u.as_double);
+  }
+}
+inline c10::SymFloat IValue::toSymFloat() const& {
+  AT_ASSERT(isSymFloat() || isDouble(), "Expected SymFloat or double but got ", tagKind());
+  if (isSymFloat()) {
+    return c10::SymFloat(toIntrusivePtr<c10::SymNodeImpl>());
+  } else {
+    return c10::SymFloat(payload.u.as_double);
+  }
+}
+inline c10::SymBool IValue::toSymBool() && {
+  AT_ASSERT(isSymBool() || isBool(), "Expected SymBool or boolean but got ", tagKind());
+  if (isSymBool()) {
+    return c10::SymBool(moveToIntrusivePtr<c10::SymNodeImpl>());
+  } else {
+    return c10::SymBool(payload.u.as_bool);
+  }
+}
+
+inline c10::SymBool IValue::toSymBool() const& {
+  AT_ASSERT(isSymBool() || isBool(), "Expected SymBool or boolean but got ", tagKind());
+  if (isSymBool()) {
+    return c10::SymBool(toIntrusivePtr<c10::SymNodeImpl>());
+  } else {
+    return c10::SymBool(payload.u.as_bool);
+  }
 }
 
 namespace ivalue {
@@ -498,6 +565,7 @@ struct TORCH_API TupleElements {
       TORCH_CHECK(idx < inlineSize_, "TupleElements: invalid index Index = ", idx, "; Length = ", inlineSize_);
       return elementsInline_[idx];
     } else {
+      TORCH_CHECK(idx < elementsVector_.size(), "TupleElements: invalid index Index = ", idx, "; Length = ", elementsVector_.size());
       return elementsVector_.at(idx);
     }
   }
@@ -902,7 +970,7 @@ struct C10_EXPORT ivalue::Future final : c10::intrusive_ptr_target {
           "Skipping setting following error on the Future since "
           "it is already marked completed (this is not necessarily "
           "an error):\n",
-          tryRetrieveErrorMessageInternal(eptr));
+          tryRetrieveErrorMessageInternal(std::move(eptr)));
       if (eptr_) {
         msg += c10::str(
             ", \nOriginal exception:\n",
@@ -980,28 +1048,22 @@ struct C10_EXPORT ivalue::Future final : c10::intrusive_ptr_target {
     using IValueWithStorages = std::tuple<IValue, std::vector<WeakStorage>>;
 #if __cpp_lib_is_invocable >= 201703
     static_assert(
-        guts::disjunction<
+        std::disjunction<
             std::is_invocable_r<IValue, T, Future&>,
             std::is_invocable_r<IValueWithStorages, T, Future&>>::value,
         "The callback must have signature IValue(Future&) or "
         "std::tuple<IValue, std::vector<Storage>>(Future&)");
 #endif
-    auto childFut = createInstance(std::move(type));
+    auto childFut = createInstance(::std::move(type));
     addCallback([childFut,
                  cb = std::move(callback)](Future& parentFut) mutable {
       try {
-        guts::if_constexpr<std::is_convertible<
-            typename std::result_of<T && (Future&)>::type,
-            IValueWithStorages>::value>(
-            [&](auto identity) {
-              IValue value;
-              std::vector<WeakStorage> storages;
-              std::tie(value, storages) = identity(cb)(parentFut);
-              childFut->markCompleted(std::move(value), std::move(storages));
-            },
-            [&](auto identity) {
-              childFut->markCompleted(identity(cb)(parentFut));
-            });
+        if constexpr (::std::is_convertible_v<typename c10::invoke_result_t<T &&, Future&>, IValueWithStorages>) {
+          auto [ivalue, storages] = cb(parentFut);
+          childFut->markCompleted(::std::move(ivalue), ::std::move(storages));
+        } else {
+          childFut->markCompleted(cb(parentFut));
+        }
       } catch (std::exception&) {
         childFut->setError(std::current_exception());
       }
@@ -1101,6 +1163,7 @@ struct C10_EXPORT ivalue::Future final : c10::intrusive_ptr_target {
     c10::OptionalDeviceGuard deviceGuard(currentDevice_);
 
     std::vector<c10::Stream> streams;
+    streams.reserve(devices_.size());
     for (const c10::Device& device : devices_) {
       streams.push_back(impl_.getStreamFromGlobalPool(device));
     }
@@ -1156,7 +1219,7 @@ struct C10_EXPORT ivalue::Future final : c10::intrusive_ptr_target {
   // Tries to retrieve the error message from std::exception_ptr.
   std::string tryRetrieveErrorMessageInternal(std::exception_ptr eptr) const {
     try {
-      std::rethrow_exception(eptr);
+      std::rethrow_exception(std::move(eptr));
     } catch (const std::exception& e) {
       return e.what();
     } catch (...) {
@@ -1321,6 +1384,78 @@ struct C10_EXPORT ivalue::Future final : c10::intrusive_ptr_target {
   const std::vector<c10::Device> devices_;
 };
 
+struct C10_EXPORT ivalue::Await final : c10::intrusive_ptr_target {
+ private:
+  explicit Await(TypePtr elType, std::function<IValue()> fn)
+      : elType_(std::move(elType)), type_(AwaitType::create(elType_)), fn_(std::move(fn)) {}
+
+  explicit Await(TypePtr elType) : elType_(std::move(elType)), type_(AwaitType::create(elType_)) { }
+
+  friend c10::intrusive_ptr<Await>;
+
+ public:
+  Await(const Await&) = delete;
+  Await(Await&&) = delete;
+  Await& operator=(const Await&) = delete;
+  Await& operator=(Await&&) = delete;
+
+  IValue wait() {
+    if (!completed_) {
+      TORCH_CHECK(fn_, "Incompleted Await: fn can't be None");
+      value_ = fn_();
+      completed_ = true;
+      args_ = {};
+    }
+    return value_;
+  }
+
+  IValue value() {
+    TORCH_CHECK(completed_, "Await must be completed");
+    return value_;
+  }
+
+  void setFn(std::function<IValue()> fn) {
+    fn_ = std::move(fn);
+  }
+
+  bool completed() {
+    return completed_;
+  }
+
+  void markCompleted(IValue value) {
+    value_ = std::move(value);
+    completed_ = true;
+  }
+
+  TORCH_API friend std::ostream& operator<<(
+      std::ostream& out,
+      const Await& v);
+
+  TypePtr elementType() const {
+    return elType_;
+  }
+
+  TypePtr type() const {
+    return type_;
+  }
+
+  void setArgs(std::vector<IValue> args) {
+    args_ = std::move(args);
+  }
+
+  std::vector<IValue>& args() {
+    return args_;
+  }
+
+ private:
+  TypePtr elType_;
+  TypePtr type_;
+  std::vector<IValue> args_;
+  std::function<IValue()> fn_;
+  IValue value_;
+  bool completed_{};
+};
+
 // Input is a list of Futures with the same target type.
 // Output is a Future to the List of completed Futures.
 TORCH_API intrusive_ptr<ivalue::Future> collectAll(
@@ -1438,12 +1573,19 @@ struct C10_EXPORT ivalue::Object final : c10::intrusive_ptr_target {
 
   c10::intrusive_ptr<Object> copy() const;
 
-  c10::intrusive_ptr<Object> deepcopy() const;
+  c10::intrusive_ptr<Object> deepcopy(
+      c10::optional<at::Device> device = c10::nullopt) const;
 
-  c10::intrusive_ptr<Object> deepcopy(IValue::HashAliasedIValueMap& memo) const;
+  c10::intrusive_ptr<Object> deepcopy(
+      IValue::HashAliasedIValueMap& memo,
+      c10::optional<at::Device> device = c10::nullopt) const;
 
   bool is_weak_compilation_ref() const {
     return !type_.holds_strong_ref();
+  }
+
+  bool is_empty_strong_compilation_ref() const {
+    return type_.holds_empty_strong_ref();
   }
 
  private:
@@ -1463,7 +1605,7 @@ struct ivalue::PyObjectHolder : c10::intrusive_ptr_target {
   virtual std::string toStr() = 0;
   virtual std::vector<at::Tensor> extractTensors() = 0;
 
-  virtual ~PyObjectHolder(){};
+  ~PyObjectHolder() override = default;
 };
 
 struct ivalue::EnumHolder : c10::intrusive_ptr_target {
@@ -1483,7 +1625,7 @@ struct ivalue::EnumHolder : c10::intrusive_ptr_target {
 
   TORCH_API friend std::ostream& operator<<(
       std::ostream& out,
-      const EnumHolder& v);
+      const ivalue::EnumHolder& v);
 
   TORCH_API const std::string qualifiedClassName() const;
 
@@ -1574,6 +1716,7 @@ DEFINE_TO(c10::intrusive_ptr<ivalue::Tuple>, toTuple)
 DEFINE_TO(std::string, toStringRef)
 DEFINE_TO(c10::string_view, toStringView)
 DEFINE_TO(c10::intrusive_ptr<ivalue::Future>, toFuture)
+DEFINE_TO(c10::intrusive_ptr<ivalue::Await>, toAwait)
 DEFINE_TO(c10::intrusive_ptr<c10::RRefInterface>, toRRef)
 DEFINE_TO(c10::intrusive_ptr<at::Quantizer>, toQuantizer)
 DEFINE_TO(IValue, toIValue)
@@ -1584,6 +1727,9 @@ DEFINE_TO(at::MemoryFormat, toMemoryFormat)
 DEFINE_TO(at::QScheme, toQScheme)
 DEFINE_TO(at::Dimname, toDimname)
 DEFINE_TO(at::Generator, toGenerator)
+DEFINE_TO(c10::SymInt, toSymInt)
+DEFINE_TO(c10::SymFloat, toSymFloat)
+DEFINE_TO(c10::SymBool, toSymBool)
 
 template <class T>
 struct _fake_type {};
@@ -1670,8 +1816,8 @@ template <typename T>
 static T createVectorLikeFromList(const c10::detail::ListImpl* impl) {
   T result;
   result.reserve(impl->list.size());
-  for (size_t i = 0, N = impl->list.size(); i < N; ++i) {
-    result.push_back(impl->list[i].to<typename T::value_type>());
+  for (const auto & i : impl->list) {
+    result.push_back(i.to<typename T::value_type>());
   }
   return result;
 }
@@ -1772,11 +1918,11 @@ template <
     typename... Args,
     typename Indices = std::make_index_sequence<sizeof...(Args)>,
     std::enable_if_t<
-        !guts::disjunction<
+        !std::disjunction<
             std::is_lvalue_reference<Args>...,
-            guts::negation<std::is_constructible<IValue, Args>>...>::value,
+            std::negation<std::is_constructible<IValue, Args>>...>::value,
         std::nullptr_t> = nullptr>
-std::tuple<Args...> generic_to(IValue ivalue, _fake_type<std::tuple<Args...>>) {
+std::tuple<Args...> generic_to(const IValue& ivalue, _fake_type<std::tuple<Args...>>) {
   const auto& vals = ivalue.toTupleRef().elements();
   TORCH_CHECK(vals.size() == sizeof...(Args));
   return detail::generic_to_tuple_impl<std::tuple<Args...>>(vals, Indices{});
@@ -1814,6 +1960,14 @@ inline std::vector<int64_t> IValue::toIntVector() const {
       payload.u.as_intrusive_ptr != c10::UndefinedTensorImpl::singleton(),
       "called toIntVector on null intrusive_ptr IValue");
   return createVectorFromList<int64_t>(
+      static_cast<const c10::detail::ListImpl*>(payload.u.as_intrusive_ptr));
+}
+inline std::vector<c10::SymInt> IValue::toSymIntVector() const {
+  AT_ASSERT(isSymIntList() || isIntList(), "Expected SymIntList or IntList but got ", tagKind());
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      payload.u.as_intrusive_ptr != c10::UndefinedTensorImpl::singleton(),
+      "called toSymIntVector on null intrusive_ptr IValue");
+  return createVectorFromList<c10::SymInt>(
       static_cast<const c10::detail::ListImpl*>(payload.u.as_intrusive_ptr));
 }
 inline at::DimVector IValue::toDimVector() const {
@@ -1880,6 +2034,22 @@ inline std::vector<at::Tensor> IValue::toTensorVector() const {
   return createVectorFromList<at::Tensor>(
       static_cast<const c10::detail::ListImpl*>(payload.u.as_intrusive_ptr));
 }
+inline c10::List<c10::optional<at::Tensor>> IValue::toOptionalTensorList() && {
+  AT_ASSERT(isOptionalTensorList(), "Expected OptionalTensorList but got ", tagKind());
+  return c10::List<c10::optional<at::Tensor>>(moveToIntrusivePtr<c10::detail::ListImpl>());
+}
+inline c10::List<c10::optional<at::Tensor>> IValue::toOptionalTensorList() const& {
+  AT_ASSERT(isOptionalTensorList(), "Expected OptionalTensorList but got ", tagKind());
+  return c10::List<c10::optional<at::Tensor>>(toIntrusivePtr<c10::detail::ListImpl>());
+}
+inline std::vector<c10::optional<at::Tensor>> IValue::toOptionalTensorVector() const {
+  AT_ASSERT(isOptionalTensorList(), "Expected OptionalTensorList but got ", tagKind());
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+      payload.u.as_intrusive_ptr != c10::UndefinedTensorImpl::singleton(),
+      "called toOptionalTensorVector on null intrusive_ptr IValue");
+  return createVectorFromList<c10::optional<at::Tensor>>(
+      static_cast<const c10::detail::ListImpl*>(payload.u.as_intrusive_ptr));
+}
 inline c10::List<IValue> IValue::toList() && {
   AT_ASSERT(isList(), "Expected GenericList but got ", tagKind());
   return c10::List<IValue>(moveToIntrusivePtr<c10::detail::ListImpl>());
@@ -1922,50 +2092,48 @@ inline ivalue::Tuple& IValue::toTupleRef() const {
 }
 
 inline IValue::IValue(c10::intrusive_ptr<ivalue::Tuple> v)
-    : tag(Tag::Tuple), is_intrusive_ptr(true) {
+    : tag(Tag::Tuple) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.release());
 }
 template <
     typename... Args,
     std::enable_if_t<
-        !guts::disjunction<
+        !std::disjunction<
             std::is_lvalue_reference<Args>...,
-            guts::negation<std::is_constructible<IValue, Args>>...>::value,
+            std::negation<std::is_constructible<IValue, Args>>...>::value,
         std::nullptr_t>>
 inline IValue::IValue(const std::tuple<Args...>& t)
-    : IValue(
-          std::move(c10::guts::apply(c10::ivalue::Tuple::create<const Args&...>, t))) {
+    : IValue(c10::guts::apply(c10::ivalue::Tuple::create<const Args&...>, t)) {
 }
 
 template <
     typename... Args,
     std::enable_if_t<
-        !guts::disjunction<
+        !std::disjunction<
             std::is_lvalue_reference<Args>...,
-            guts::negation<std::is_constructible<IValue, Args>>...>::value,
+            std::negation<std::is_constructible<IValue, Args>>...>::value,
         std::nullptr_t>>
 inline IValue::IValue(std::tuple<Args...>&& t)
-    : IValue(
-          std::move(c10::guts::apply(c10::ivalue::Tuple::create<Args&&...>, std::move(t)))) {
+    : IValue(c10::guts::apply(c10::ivalue::Tuple::create<Args&&...>, std::move(t))) {
 }
 
 inline IValue::IValue(c10::intrusive_ptr<ivalue::ConstantString> v)
-    : tag(Tag::String), is_intrusive_ptr(true) {
+    : tag(Tag::String) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.release());
 }
 inline IValue::IValue(std::string v)
     : IValue(ivalue::ConstantString::create(std::move(v))) {}
 
 inline IValue::IValue(c10::impl::GenericList v)
-    : tag(Tag::GenericList), is_intrusive_ptr(true) {
+    : tag(Tag::GenericList) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.impl_.release());
 }
 
-template <class T, IValue::enable_if_ivalue_constructible<T>>
+template <class T, IValue::enable_if_list_is_ivalue_constructible<T>>
 inline IValue::IValue(c10::List<T>&& v) : IValue(impl::toList<T>(std::move(v))) {}
-template <class T, IValue::enable_if_ivalue_constructible<T>>
+template <class T, IValue::enable_if_list_is_ivalue_constructible<T>>
 inline IValue::IValue(const c10::List<T>& v) : IValue(impl::toList<T>(v)) {}
-template <class T, IValue::enable_if_ivalue_constructible<T>>
+template <class T, IValue::enable_if_list_is_ivalue_constructible<T>>
 inline IValue::IValue(at::ArrayRef<T> v) : IValue(c10::List<T>()) {
   auto list = to<c10::List<T>>();
   list.reserve(v.size());
@@ -1973,7 +2141,33 @@ inline IValue::IValue(at::ArrayRef<T> v) : IValue(c10::List<T>()) {
     list.push_back(e);
   }
 }
-template <class T, IValue::enable_if_ivalue_constructible<T>>
+template <class T, IValue::enable_if_symint<T>>
+inline IValue::IValue(at::ArrayRef<T> v) : IValue() {
+  auto vi = c10::asIntArrayRefSlowOpt(v);
+  if (vi.has_value()) {
+    // This list is entirely integers; ensure it is typed as
+    // an IntList so toIntList works
+    *this = IValue(*vi);
+  } else {
+    // This list has SymInts; type it as a SymInt
+    *this = IValue(impl::toList<c10::SymInt>(c10::List<c10::SymInt>()));
+    auto list = to<c10::List<c10::SymInt>>();
+    list.reserve(v.size());
+    for (const auto& e : v) {
+      list.push_back(e);
+    }
+  }
+}
+template <class T, IValue::enable_if_symint<T>>
+inline IValue::IValue(at::OptionalArrayRef<T> mb_v) : IValue() {
+  if (!mb_v.has_value()) return;
+  *this = IValue(*mb_v);
+}
+template <class T, IValue::enable_if_symint<T>>
+inline IValue::IValue(const std::vector<T>& v) : IValue() {
+  *this = IValue(at::ArrayRef<T>(v));
+}
+template <class T, IValue::enable_if_list_is_ivalue_constructible<T>>
 inline IValue::IValue(const std::vector<T>& v) : IValue(c10::List<T>()) {
   auto list = to<c10::List<T>>();
   list.reserve(v.size());
@@ -1981,7 +2175,7 @@ inline IValue::IValue(const std::vector<T>& v) : IValue(c10::List<T>()) {
     list.push_back(e);
   }
 }
-template <class T, IValue::enable_if_ivalue_constructible<T>>
+template <class T, IValue::enable_if_list_is_ivalue_constructible<T>>
 inline IValue::IValue(c10::OptionalArrayRef<T> v) : IValue() {
   if (v.has_value()) {
     *this = IValue(std::move(*v));
@@ -1997,8 +2191,27 @@ inline IValue::IValue(std::array<T, N> v) : IValue(c10::List<T>()) {
   }
 }
 
+template <class T, IValue::enable_if_ilist_is_ivalue_constructible<T>>
+inline IValue::IValue(c10::IListRef<T> v) : IValue() {
+  constexpr bool boxed_type_constructs_ivalue =
+      std::is_constructible<IValue, typename c10::IListRef<T>::boxed_type>::value;
+  // First, we try to use the boxed value.
+  // If we fail (either it's not in the boxed state, or its boxed type
+  // can not construct an IValue), we fallback to copying the list.
+  if (boxed_type_constructs_ivalue && v.isBoxed()) {
+    *this = IValue(impl::toList(v.toBoxed()));
+  } else {
+    c10::List<T> list;
+    list.reserve(v.size());
+    for (const auto& t : v) {
+      list.push_back(t);
+    }
+    *this = IValue(impl::toList(std::move(list)));
+  }
+}
+
 inline IValue::IValue(c10::impl::GenericDict v)
-    : tag(Tag::GenericDict), is_intrusive_ptr(true) {
+    : tag(Tag::GenericDict) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.impl_.release());
 }
 template <class Key, class Value>
@@ -2025,17 +2238,17 @@ inline IValue::IValue(c10::optional<T> v) : IValue() {
 inline IValue::IValue(c10::nullopt_t) : IValue() {}
 
 inline IValue::IValue(c10::intrusive_ptr<ivalue::Object> v)
-    : tag(Tag::Object), is_intrusive_ptr(true) {
+    : tag(Tag::Object) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.release());
 }
 
 inline IValue::IValue(c10::intrusive_ptr<ivalue::PyObjectHolder> v)
-    : tag(Tag::PyObject), is_intrusive_ptr(true) {
+    : tag(Tag::PyObject) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.release());
 }
 
 inline IValue::IValue(c10::intrusive_ptr<ivalue::EnumHolder> v)
-    : tag(Tag::Enum), is_intrusive_ptr(true) {
+    : tag(Tag::Enum) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.release());
 }
 
@@ -2043,7 +2256,6 @@ inline IValue IValue::make_capsule(
     intrusive_ptr<torch::CustomClassHolder> blob) {
   IValue iv;
   iv.tag = Tag::Capsule;
-  iv.is_intrusive_ptr = true;
   iv.payload.u.as_intrusive_ptr = null_to_undefined_tensor(blob.release());
   return iv;
 }
@@ -2051,7 +2263,7 @@ inline IValue IValue::make_capsule(
 template <
     typename T,
     std::enable_if_t<std::is_base_of<torch::CustomClassHolder, T>::value, int>>
-IValue::IValue(c10::intrusive_ptr<T> custom_class) {
+IValue::IValue(c10::intrusive_ptr<T> custom_class) : tag(Tag::Object) {
   auto classType = []() {
     try {
       return c10::getCustomClassType<c10::intrusive_ptr<T>>();
@@ -2065,28 +2277,32 @@ IValue::IValue(c10::intrusive_ptr<T> custom_class) {
   auto ivalue_obj = c10::ivalue::Object::create(std::move(classType), /* numSlots */1);
   ivalue_obj->setSlot(0, IValue::make_capsule(std::move(custom_class)));
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(ivalue_obj.release());
-  tag = Tag::Object;
-  is_intrusive_ptr = true;
+
 }
 
 inline IValue::IValue(c10::intrusive_ptr<ivalue::Future> v)
-    : tag(Tag::Future), is_intrusive_ptr(true) {
+    : tag(Tag::Future) {
+  payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.release());
+}
+
+inline IValue::IValue(c10::intrusive_ptr<ivalue::Await> v)
+    : tag(Tag::Await) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.release());
 }
 
 inline IValue::IValue(c10::intrusive_ptr<c10::RRefInterface> v)
-    : tag(Tag::RRef), is_intrusive_ptr(true) {
+    : tag(Tag::RRef) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.release());
 }
 
 inline IValue::IValue(c10::intrusive_ptr<at::Quantizer> v)
-    : tag(Tag::Quantizer), is_intrusive_ptr(true) {
+    : tag(Tag::Quantizer) {
   payload.u.as_intrusive_ptr = null_to_undefined_tensor(v.release());
 }
 
 template <typename T>
 inline IValue::IValue(c10::complex<T> c)
-    : tag(Tag::ComplexDouble), is_intrusive_ptr(true) {
+    : tag(Tag::ComplexDouble) {
   auto v = c10::make_intrusive<ivalue::ComplexHolder>(c);
   payload.u.as_intrusive_ptr = v.release();
 }
@@ -2157,7 +2373,7 @@ inline bool IValue::isSameIdentity(const IValue& rhs) const {
   // Str) return value equality
   // 2. If it is a tensor type, we need to take undefined tensor into account
   // 3. Undefined_tensor is None and vice versa should be true
-  // 4. If it is a reference type (i.e. is_intrusive_ptr), then is is True when
+  // 4. If it is a reference type (i.e. isIntrusivePtr()), then is True when
   // the pointed-to object is the same.
   // 5. False for all other comparisons.
   if (this->isNone() && rhs.isNone()) {
@@ -2182,7 +2398,7 @@ inline bool IValue::isSameIdentity(const IValue& rhs) const {
   } else {
     // for objects holding in IValue, do shallow compare on pointer address to
     // testify the identity
-    return this->is_intrusive_ptr && rhs.is_intrusive_ptr &&
+    return this->isIntrusivePtr() && rhs.isIntrusivePtr() &&
         this->payload.u.as_intrusive_ptr == rhs.payload.u.as_intrusive_ptr;
   }
 }
@@ -2228,7 +2444,7 @@ struct MaybeOwnedTraits<IValue> {
     if (from.isTensor()) {
       return IValue(MaybeOwnedTraits<at::Tensor>::createBorrow(from.toTensor()));
     } else {
-      return IValue(from.payload, from.tag, from.is_intrusive_ptr);
+      return IValue(from.payload, from.tag);
     }
   }
 
@@ -2239,7 +2455,7 @@ struct MaybeOwnedTraits<IValue> {
     } else if (rhs.isTensor()) {
       lhs = IValue(MaybeOwnedTraits<at::Tensor>::createBorrow(rhs.toTensor()));
     } else {
-      lhs = IValue(rhs.payload, rhs.tag, rhs.is_intrusive_ptr);
+      lhs = IValue(rhs.payload, rhs.tag);
     }
   }
 

@@ -38,6 +38,7 @@ if(USE_CUDA)
   # public/*.cmake uses CAFFE2_USE_*
   set(CAFFE2_USE_CUDA ${USE_CUDA})
   set(CAFFE2_USE_CUDNN ${USE_CUDNN})
+  set(CAFFE2_USE_CUSPARSELT ${USE_CUSPARSELT})
   set(CAFFE2_USE_NVRTC ${USE_NVRTC})
   set(CAFFE2_USE_TENSORRT ${USE_TENSORRT})
   include(${CMAKE_CURRENT_LIST_DIR}/public/cuda.cmake)
@@ -45,22 +46,35 @@ if(USE_CUDA)
     # A helper variable recording the list of Caffe2 dependent libraries
     # torch::cudart is dealt with separately, due to CUDA_ADD_LIBRARY
     # design reason (it adds CUDA_LIBRARIES itself).
-    set(Caffe2_PUBLIC_CUDA_DEPENDENCY_LIBS
-      caffe2::cufft caffe2::curand caffe2::cublas)
+    set(Caffe2_PUBLIC_CUDA_DEPENDENCY_LIBS )
     if(CAFFE2_USE_NVRTC)
       list(APPEND Caffe2_PUBLIC_CUDA_DEPENDENCY_LIBS caffe2::cuda caffe2::nvrtc)
     else()
       caffe2_update_option(USE_NVRTC OFF)
     endif()
+    list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS caffe2::curand caffe2::cufft caffe2::cublas)
     if(CAFFE2_USE_CUDNN)
-      list(APPEND Caffe2_PUBLIC_CUDA_DEPENDENCY_LIBS caffe2::cudnn-public)
+      list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS torch::cudnn)
     else()
       caffe2_update_option(USE_CUDNN OFF)
+    endif()
+    if(CAFFE2_USE_CUSPARSELT)
+      list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS torch::cusparselt)
+    else()
+      caffe2_update_option(USE_CUSPARSELT OFF)
     endif()
     if(CAFFE2_USE_TENSORRT)
       list(APPEND Caffe2_PUBLIC_CUDA_DEPENDENCY_LIBS caffe2::tensorrt)
     else()
       caffe2_update_option(USE_TENSORRT OFF)
+    endif()
+    find_program(SCCACHE_EXECUTABLE sccache)
+    if(SCCACHE_EXECUTABLE)
+      # Using RSP/--options-file renders output noncacheable by sccache
+      # as they fall under `multiple input files` non-cacheable rule
+      set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_INCLUDES 0)
+      set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_LIBRARIES 0)
+      set(CMAKE_CUDA_USE_RESPONSE_FILE_FOR_OBJECTS 0)
     endif()
   else()
     message(WARNING
@@ -68,61 +82,52 @@ if(USE_CUDA)
       "-DUSE_CUDA=OFF.")
     caffe2_update_option(USE_CUDA OFF)
     caffe2_update_option(USE_CUDNN OFF)
+    caffe2_update_option(USE_CUSPARSELT OFF)
     caffe2_update_option(USE_NVRTC OFF)
     caffe2_update_option(USE_TENSORRT OFF)
     set(CAFFE2_USE_CUDA OFF)
     set(CAFFE2_USE_CUDNN OFF)
+    set(CAFFE2_USE_CUSPARSELT OFF)
     set(CAFFE2_USE_NVRTC OFF)
     set(CAFFE2_USE_TENSORRT OFF)
   endif()
 endif()
 
 # ---[ Custom Protobuf
-if(CAFFE2_CMAKE_BUILDING_WITH_MAIN_REPO AND (NOT INTERN_BUILD_MOBILE OR BUILD_CAFFE2_MOBILE))
+if(CAFFE2_CMAKE_BUILDING_WITH_MAIN_REPO AND NOT INTERN_BUILD_MOBILE)
   disable_ubsan()
   include(${CMAKE_CURRENT_LIST_DIR}/ProtoBuf.cmake)
   enable_ubsan()
 endif()
 
-# For MSVC,
-# 1. Remove /Zi, /ZI and /Z7 for Release, MinSizeRel and Default builds
-# 2. Switch off incremental linking in debug builds
-# 3. If MSVC_Z7_OVERRIDE is ON, then /Zi and /ZI will be replaced with /Z7
-#    for Debug and RelWithDebInfo builds
-if(MSVC)
-  # skip unwanted includes from windows.h
-  add_definitions(-DWIN32_LEAN_AND_MEAN)
-  foreach(flag_var
-      CMAKE_C_FLAGS CMAKE_C_FLAGS_RELEASE CMAKE_C_FLAGS_MINSIZEREL
-      CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_RELEASE CMAKE_CXX_FLAGS_MINSIZEREL)
-    if(${flag_var} MATCHES "/Z[iI7]")
-      string(REGEX REPLACE "/Z[iI7]" "" ${flag_var} "${${flag_var}}")
+if(USE_ASAN OR USE_TSAN)
+  find_package(Sanitizer REQUIRED)
+  if(USE_ASAN)
+    if(TARGET Sanitizer::address)
+      list(APPEND Caffe2_DEPENDENCY_LIBS Sanitizer::address)
+    else()
+      message(WARNING "Not ASAN found. Suppress this warning with -DUSE_ASAN=OFF.")
+      caffe2_update_option(USE_ASAN OFF)
     endif()
-  endforeach(flag_var)
-  if(MSVC_Z7_OVERRIDE)
-    foreach(flag_var
-        CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELWITHDEBINFO
-        CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELWITHDEBINFO)
-      if(${flag_var} MATCHES "/Z[iI]")
-        string(REGEX REPLACE "/Z[iI]" "/Z7" ${flag_var} "${${flag_var}}")
-      endif()
-    endforeach(flag_var)
-  endif(MSVC_Z7_OVERRIDE)
-  foreach(flag_var
-      CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO
-      CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO
-      CMAKE_SHARED_LINKER_FLAGS_DEBUG CMAKE_STATIC_LINKER_FLAGS_DEBUG
-      CMAKE_EXE_LINKER_FLAGS_DEBUG CMAKE_MODULE_LINKER_FLAGS_DEBUG)
-    if(${flag_var} MATCHES "/INCREMENTAL" AND NOT ${flag_var} MATCHES "/INCREMENTAL:NO")
-      string(REGEX REPLACE "/INCREMENTAL" "/INCREMENTAL:NO" ${flag_var} "${${flag_var}}")
+    if(TARGET Sanitizer::undefined)
+      list(APPEND Caffe2_DEPENDENCY_LIBS Sanitizer::undefined)
     endif()
-  endforeach(flag_var)
-endif(MSVC)
+  endif()
+  if(USE_TSAN)
+    if(TARGET Sanitizer::thread)
+      list(APPEND Caffe2_DEPENDENCY_LIBS Sanitizer::thread)
+    else()
+      message(WARNING "Not TSAN found. Suppress this warning with -DUSE_TSAN=OFF.")
+      caffe2_update_option(USE_TSAN OFF)
+    endif()
+  endif()
+endif()
 
 # ---[ Threads
-include(${CMAKE_CURRENT_LIST_DIR}/public/threads.cmake)
-if(TARGET caffe2::Threads)
-  list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS caffe2::Threads)
+find_package(Threads REQUIRED)
+if(TARGET Threads::Threads)
+  list(APPEND Caffe2_DEPENDENCY_LIBS Threads::Threads)
+  add_library(caffe2::Threads ALIAS Threads::Threads)
 else()
   message(FATAL_ERROR
       "Cannot find threading library. Caffe2 requires Threads to compile.")
@@ -166,6 +171,7 @@ endif()
 
 # ---[ BLAS
 
+set(AT_MKLDNN_ACL_ENABLED 0)
 # setting default preferred BLAS options if not already present.
 if(NOT INTERN_BUILD_MOBILE)
   set(BLAS "MKL" CACHE STRING "Selected BLAS library")
@@ -183,22 +189,22 @@ if(BLAS STREQUAL "Eigen")
 elseif(BLAS STREQUAL "ATLAS")
   find_package(Atlas REQUIRED)
   include_directories(SYSTEM ${ATLAS_INCLUDE_DIRS})
-  list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS ${ATLAS_LIBRARIES})
-  list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS cblas)
+  list(APPEND Caffe2_DEPENDENCY_LIBS ${ATLAS_LIBRARIES})
+  list(APPEND Caffe2_DEPENDENCY_LIBS cblas)
   set(BLAS_INFO "atlas")
   set(BLAS_FOUND 1)
   set(BLAS_LIBRARIES ${ATLAS_LIBRARIES} cblas)
 elseif(BLAS STREQUAL "OpenBLAS")
   find_package(OpenBLAS REQUIRED)
   include_directories(SYSTEM ${OpenBLAS_INCLUDE_DIR})
-  list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS ${OpenBLAS_LIB})
+  list(APPEND Caffe2_DEPENDENCY_LIBS ${OpenBLAS_LIB})
   set(BLAS_INFO "open")
   set(BLAS_FOUND 1)
   set(BLAS_LIBRARIES ${OpenBLAS_LIB})
 elseif(BLAS STREQUAL "BLIS")
   find_package(BLIS REQUIRED)
   include_directories(SYSTEM ${BLIS_INCLUDE_DIR})
-  list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS ${BLIS_LIB})
+  list(APPEND Caffe2_DEPENDENCY_LIBS ${BLIS_LIB})
 elseif(BLAS STREQUAL "MKL")
   if(BLAS_SET_BY_USER)
     find_package(MKL REQUIRED)
@@ -225,19 +231,24 @@ elseif(BLAS STREQUAL "MKL")
 elseif(BLAS STREQUAL "vecLib")
   find_package(vecLib REQUIRED)
   include_directories(SYSTEM ${vecLib_INCLUDE_DIR})
-  list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS ${vecLib_LINKER_LIBS})
+  list(APPEND Caffe2_DEPENDENCY_LIBS ${vecLib_LINKER_LIBS})
   set(BLAS_INFO "veclib")
   set(BLAS_FOUND 1)
   set(BLAS_LIBRARIES ${vecLib_LINKER_LIBS})
 elseif(BLAS STREQUAL "FlexiBLAS")
   find_package(FlexiBLAS REQUIRED)
   include_directories(SYSTEM ${FlexiBLAS_INCLUDE_DIR})
-  list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS ${FlexiBLAS_LIB})
+  list(APPEND Caffe2_DEPENDENCY_LIBS ${FlexiBLAS_LIB})
 elseif(BLAS STREQUAL "Generic")
   # On Debian family, the CBLAS ABIs have been merged into libblas.so
-  find_library(BLAS_LIBRARIES blas)
+  if(ENV{GENERIC_BLAS_LIBRARIES} STREQUAL "")
+    set(GENERIC_BLAS "blas")
+  else()
+    set(GENERIC_BLAS $ENV{GENERIC_BLAS_LIBRARIES})
+  endif()
+  find_library(BLAS_LIBRARIES NAMES ${GENERIC_BLAS})
   message("-- Using BLAS: ${BLAS_LIBRARIES}")
-  list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS ${BLAS_LIBRARIES})
+  list(APPEND Caffe2_DEPENDENCY_LIBS ${BLAS_LIBRARIES})
   set(GENERIC_BLAS_FOUND TRUE)
   set(BLAS_INFO "generic")
   set(BLAS_FOUND 1)
@@ -248,7 +259,6 @@ endif()
 if(NOT INTERN_BUILD_MOBILE)
   set(AT_MKL_ENABLED 0)
   set(AT_MKL_SEQUENTIAL 0)
-  set(AT_MKL_MT 0)
   set(USE_BLAS 1)
   if(NOT (ATLAS_FOUND OR BLIS_FOUND OR GENERIC_BLAS_FOUND OR MKL_FOUND OR OpenBLAS_FOUND OR VECLIB_FOUND OR FlexiBLAS_FOUND))
     message(WARNING "Preferred BLAS (" ${BLAS} ") cannot be found, now searching for a general BLAS library")
@@ -262,10 +272,6 @@ if(NOT INTERN_BUILD_MOBILE)
     if("${MKL_THREADING}" STREQUAL "SEQ")
       set(AT_MKL_SEQUENTIAL 1)
     endif()
-    if(MSVC AND MKL_LIBRARIES MATCHES ".*libiomp5md\\.lib.*")
-      add_definitions(-D_OPENMP_NOFORCE_MANIFEST)
-      set(AT_MKL_MT 1)
-    endif()
     set(AT_MKL_ENABLED 1)
   endif()
 elseif(INTERN_USE_EIGEN_BLAS)
@@ -273,21 +279,6 @@ elseif(INTERN_USE_EIGEN_BLAS)
   set(USE_BLAS 1)
   include(${CMAKE_CURRENT_LIST_DIR}/External/EigenBLAS.cmake)
   list(APPEND Caffe2_DEPENDENCY_LIBS eigen_blas)
-endif()
-
-# ---[ FFTW
-set(AT_FFTW_ENABLED 0)
-set(USE_FFTW OFF)
-if(USE_FFTW OR NOT MKL_FOUND)
-  find_library(LIBFFTW3 fftw3)
-  if(LIBFFTW3)
-    find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h ONLY_CMAKE_FIND_ROOT_PATH)
-    if(FFTW3_INCLUDE_DIR)
-      SET(AT_FFTW_ENABLED 1)
-      SET(USE_FFTW ON)
-      include_directories(${FFTW3_INCLUDE_DIR})
-    endif()
-  endif()
 endif()
 
 # --- [ PocketFFT
@@ -442,43 +433,46 @@ else()
   set(USE_PTHREADPOOL OFF CACHE BOOL "" FORCE)
 endif()
 
-# ---[ Caffe2 uses cpuinfo library in the thread pool
-if(NOT TARGET cpuinfo AND USE_SYSTEM_CPUINFO)
-  add_library(cpuinfo SHARED IMPORTED)
-  find_library(CPUINFO_LIBRARY cpuinfo)
-  if(NOT CPUINFO_LIBRARY)
-    message(FATAL_ERROR "Cannot find cpuinfo")
-  endif()
-  message("Found cpuinfo: ${CPUINFO_LIBRARY}")
-  set_target_properties(cpuinfo PROPERTIES IMPORTED_LOCATION "${CPUINFO_LIBRARY}")
-elseif(NOT TARGET cpuinfo)
-  if(NOT DEFINED CPUINFO_SOURCE_DIR)
-    set(CPUINFO_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../third_party/cpuinfo" CACHE STRING "cpuinfo source directory")
-  endif()
-
-  set(CPUINFO_BUILD_TOOLS OFF CACHE BOOL "")
-  set(CPUINFO_BUILD_UNIT_TESTS OFF CACHE BOOL "")
-  set(CPUINFO_BUILD_MOCK_TESTS OFF CACHE BOOL "")
-  set(CPUINFO_BUILD_BENCHMARKS OFF CACHE BOOL "")
-  set(CPUINFO_LIBRARY_TYPE "static" CACHE STRING "")
-  set(CPUINFO_LOG_LEVEL "error" CACHE STRING "")
-  if(MSVC)
-    if(CAFFE2_USE_MSVC_STATIC_RUNTIME)
-      set(CPUINFO_RUNTIME_TYPE "static" CACHE STRING "")
-    else()
-      set(CPUINFO_RUNTIME_TYPE "shared" CACHE STRING "")
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "s390x")
+  # ---[ Caffe2 uses cpuinfo library in the thread pool
+  # ---[ But it doesn't support s390x and thus not used on s390x
+  if(NOT TARGET cpuinfo AND USE_SYSTEM_CPUINFO)
+    add_library(cpuinfo SHARED IMPORTED)
+    find_library(CPUINFO_LIBRARY cpuinfo)
+    if(NOT CPUINFO_LIBRARY)
+      message(FATAL_ERROR "Cannot find cpuinfo")
     endif()
+    message("Found cpuinfo: ${CPUINFO_LIBRARY}")
+    set_target_properties(cpuinfo PROPERTIES IMPORTED_LOCATION "${CPUINFO_LIBRARY}")
+  elseif(NOT TARGET cpuinfo)
+    if(NOT DEFINED CPUINFO_SOURCE_DIR)
+      set(CPUINFO_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../third_party/cpuinfo" CACHE STRING "cpuinfo source directory")
+    endif()
+
+    set(CPUINFO_BUILD_TOOLS OFF CACHE BOOL "")
+    set(CPUINFO_BUILD_UNIT_TESTS OFF CACHE BOOL "")
+    set(CPUINFO_BUILD_MOCK_TESTS OFF CACHE BOOL "")
+    set(CPUINFO_BUILD_BENCHMARKS OFF CACHE BOOL "")
+    set(CPUINFO_LIBRARY_TYPE "static" CACHE STRING "")
+    set(CPUINFO_LOG_LEVEL "error" CACHE STRING "")
+    if(MSVC)
+      if(CAFFE2_USE_MSVC_STATIC_RUNTIME)
+        set(CPUINFO_RUNTIME_TYPE "static" CACHE STRING "")
+      else()
+        set(CPUINFO_RUNTIME_TYPE "shared" CACHE STRING "")
+      endif()
+    endif()
+    add_subdirectory(
+      "${CPUINFO_SOURCE_DIR}"
+      "${CONFU_DEPENDENCIES_BINARY_DIR}/cpuinfo")
+    # We build static version of cpuinfo but link
+    # them into a shared library for Caffe2, so they need PIC.
+    set_property(TARGET cpuinfo PROPERTY POSITION_INDEPENDENT_CODE ON)
+    # Need to set this to avoid conflict with XNNPACK's clog external project
+    set(CLOG_SOURCE_DIR "${CPUINFO_SOURCE_DIR}/deps/clog")
   endif()
-  add_subdirectory(
-    "${CPUINFO_SOURCE_DIR}"
-    "${CONFU_DEPENDENCIES_BINARY_DIR}/cpuinfo")
-  # We build static version of cpuinfo but link
-  # them into a shared library for Caffe2, so they need PIC.
-  set_property(TARGET cpuinfo PROPERTY POSITION_INDEPENDENT_CODE ON)
-  # Need to set this to avoid conflict with XNNPACK's clog external project
-  set(CLOG_SOURCE_DIR "${CPUINFO_SOURCE_DIR}/deps/clog")
+  list(APPEND Caffe2_DEPENDENCY_LIBS cpuinfo)
 endif()
-list(APPEND Caffe2_DEPENDENCY_LIBS cpuinfo)
 
 # ---[ QNNPACK
 if(USE_QNNPACK)
@@ -623,11 +617,24 @@ if(USE_XNNPACK AND NOT USE_SYSTEM_XNNPACK)
     set(XNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "")
     set(XNNPACK_BUILD_TESTS OFF CACHE BOOL "")
 
+    # Disable ARM BF16 and FP16 vector for now; unused and causes build failures because
+    # these new ISA features may not be supported on older compilers
+    set(XNNPACK_ENABLE_ARM_BF16 OFF CACHE BOOL "")
+    set(XNNPACK_ENABLE_ARM_FP16_VECTOR OFF CACHE BOOL "")
+
+    # Setting this global PIC flag for all XNNPACK targets.
+    # This is needed for Object libraries within XNNPACK which must
+    # be PIC to successfully link this static libXNNPACK with pytorch
+    set(__caffe2_CMAKE_POSITION_INDEPENDENT_CODE_FLAG ${CMAKE_POSITION_INDEPENDENT_CODE})
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
     add_subdirectory(
       "${XNNPACK_SOURCE_DIR}"
       "${CONFU_DEPENDENCIES_BINARY_DIR}/XNNPACK")
 
-    set_property(TARGET XNNPACK PROPERTY POSITION_INDEPENDENT_CODE ON)
+    # Revert to whatever it was before
+    set(CMAKE_POSITION_INDEPENDENT_CODE ${__caffe2_CMAKE_POSITION_INDEPENDENT_CODE_FLAG})
+
     # Workaround for https://github.com/pytorch/pytorch/issues/47292
     if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_COMPILER_IS_GNUCXX AND (CMAKE_CXX_COMPILER_VERSION VERSION_LESS 7.5.0))
       # Compiling qu8-requantization/precise-psimd.c without any optimization flags on gcc-7.4 or older i
@@ -817,8 +824,9 @@ if(USE_FBGEMM)
     set_property(TARGET fbgemm_avx512 PROPERTY POSITION_INDEPENDENT_CODE ON)
     set_property(TARGET fbgemm PROPERTY POSITION_INDEPENDENT_CODE ON)
     if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 13.0.0)
-        # See https://github.com/pytorch/pytorch/issues/74352
-        target_compile_options(asmjit PRIVATE -Wno-deprecated-copy -Wno-unused-but-set-variable)
+      # See https://github.com/pytorch/pytorch/issues/74352
+      target_compile_options_if_supported(asmjit -Wno-deprecated-copy)
+      target_compile_options_if_supported(asmjit -Wno-unused-but-set-variable)
     endif()
   endif()
 
@@ -876,10 +884,7 @@ endif()
 if(USE_NUMA)
   if(LINUX)
     find_package(Numa)
-    if(NUMA_FOUND)
-      include_directories(SYSTEM ${Numa_INCLUDE_DIR})
-      list(APPEND Caffe2_DEPENDENCY_LIBS ${Numa_LIBRARIES})
-    else()
+    if(NOT NUMA_FOUND)
       message(WARNING "Not compiling with NUMA. Suppress this warning with -DUSE_NUMA=OFF")
       caffe2_update_option(USE_NUMA OFF)
     endif()
@@ -949,6 +954,19 @@ if(USE_FFMPEG)
   else()
     message("Not compiling with FFmpeg. Suppress this warning with -DUSE_FFMPEG=OFF")
     caffe2_update_option(USE_FFMPEG OFF)
+  endif()
+endif()
+
+if(USE_ITT)
+  find_package(ITT)
+  if(ITT_FOUND)
+    include_directories(SYSTEM ${ITT_INCLUDE_DIR})
+    list(APPEND Caffe2_DEPENDENCY_LIBS ${ITT_LIBRARIES})
+    list(APPEND TORCH_PYTHON_LINK_LIBRARIES ${ITT_LIBRARIES})
+  else()
+    message(WARNING "Not compiling with ITT. Suppress this warning with -DUSE_ITT=OFF")
+    set(USE_ITT OFF CACHE BOOL "" FORCE)
+    caffe2_update_option(USE_ITT OFF)
   endif()
 endif()
 
@@ -1049,17 +1067,22 @@ if(BUILD_PYTHON)
 
   # These should fill in the rest of the variables, like versions, but resepct
   # the variables we set above
-  set(Python_ADDITIONAL_VERSIONS ${PYTHON_VERSION} 3.8 3.7)
+  set(Python_ADDITIONAL_VERSIONS ${PYTHON_VERSION} 3.8)
   find_package(PythonInterp 3.0)
   find_package(PythonLibs 3.0)
+
+  if(NOT PYTHONLIBS_VERSION_STRING)
+    message(FATAL_ERROR
+      "Python development libraries could not be found.")
+  endif()
 
   if(${PYTHONLIBS_VERSION_STRING} VERSION_LESS 3)
     message(FATAL_ERROR
       "Found Python libraries version ${PYTHONLIBS_VERSION_STRING}. Python 2 has reached end-of-life and is no longer supported by PyTorch.")
   endif()
-  if(${PYTHONLIBS_VERSION_STRING} VERSION_LESS 3.7)
+  if(${PYTHONLIBS_VERSION_STRING} VERSION_LESS 3.8)
     message(FATAL_ERROR
-      "Found Python libraries version ${PYTHONLIBS_VERSION_STRING}. Python 3.6 is no longer supported by PyTorch.")
+      "Found Python libraries version ${PYTHONLIBS_VERSION_STRING}. Python < 3.8 is no longer supported by PyTorch.")
   endif()
 
   # When building pytorch, we pass this in directly from setup.py, and
@@ -1075,23 +1098,16 @@ if(BUILD_PYTHON)
 
   if(PYTHONINTERP_FOUND AND PYTHONLIBS_FOUND)
     add_library(python::python INTERFACE IMPORTED)
-    set_property(TARGET python::python PROPERTY
-        INTERFACE_INCLUDE_DIRECTORIES ${PYTHON_INCLUDE_DIRS})
-    set_property(TARGET python::python PROPERTY
-        INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${PYTHON_INCLUDE_DIRS})
+    target_include_directories(python::python SYSTEM INTERFACE ${PYTHON_INCLUDE_DIRS})
     if(WIN32)
-      set_property(TARGET python::python PROPERTY
-          INTERFACE_LINK_LIBRARIES ${PYTHON_LIBRARIES})
+      target_link_libraries(python::python INTERFACE ${PYTHON_LIBRARIES})
     endif()
 
     caffe2_update_option(USE_NUMPY OFF)
     if(NUMPY_FOUND)
       caffe2_update_option(USE_NUMPY ON)
       add_library(numpy::numpy INTERFACE IMPORTED)
-      set_property(TARGET numpy::numpy PROPERTY
-          INTERFACE_INCLUDE_DIRECTORIES ${NUMPY_INCLUDE_DIR})
-      set_property(TARGET numpy::numpy PROPERTY
-          INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${NUMPY_INCLUDE_DIR})
+      target_include_directories(numpy::numpy SYSTEM INTERFACE ${NUMPY_INCLUDE_DIR})
     endif()
     # Observers are required in the python build
     caffe2_update_option(USE_OBSERVERS ON)
@@ -1102,7 +1118,7 @@ if(BUILD_PYTHON)
 endif()
 
 # ---[ pybind11
-if(USE_SYSTEM_BIND11)
+if(USE_SYSTEM_PYBIND11)
   find_package(pybind11 CONFIG)
   if(NOT pybind11_FOUND)
     find_package(pybind11)
@@ -1119,12 +1135,11 @@ else()
 endif()
 message(STATUS "pybind11 include dirs: " "${pybind11_INCLUDE_DIRS}")
 add_library(pybind::pybind11 INTERFACE IMPORTED)
-set_property(TARGET pybind::pybind11 PROPERTY
-    INTERFACE_INCLUDE_DIRECTORIES ${pybind11_INCLUDE_DIRS})
-set_property(TARGET pybind::pybind11 PROPERTY
-    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${pybind11_INCLUDE_DIRS})
-set_property(TARGET pybind::pybind11 PROPERTY
-    INTERFACE_LINK_LIBRARIES python::python)
+target_include_directories(pybind::pybind11 SYSTEM INTERFACE ${pybind11_INCLUDE_DIRS})
+target_link_libraries(pybind::pybind11 INTERFACE python::python)
+if(APPLE)
+  target_link_options(pybind::pybind11 INTERFACE -undefined dynamic_lookup)
+endif()
 
 # ---[ MPI
 if(USE_MPI)
@@ -1135,9 +1150,6 @@ if(USE_MPI)
     message(STATUS "MPI include path: " ${MPI_CXX_INCLUDE_PATH})
     message(STATUS "MPI LINK flags path: " ${MPI_CXX_LINK_FLAGS})
     message(STATUS "MPI libraries: " ${MPI_CXX_LIBRARIES})
-    include_directories(SYSTEM ${MPI_CXX_INCLUDE_PATH})
-    list(APPEND Caffe2_DEPENDENCY_LIBS ${MPI_CXX_LIBRARIES})
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${MPI_CXX_LINK_FLAGS}")
     find_program(OMPI_INFO
       NAMES ompi_info
       HINTS ${MPI_CXX_LIBRARIES}/../bin)
@@ -1158,72 +1170,23 @@ if(USE_MPI)
 endif()
 
 # ---[ OpenMP
-if(USE_OPENMP)
-  # OpenMP support?
-  set(WITH_OPENMP ON CACHE BOOL "OpenMP support if available?")
-
-  # macOS + GCC
-  if(APPLE AND CMAKE_COMPILER_IS_GNUCC)
-    exec_program(uname ARGS -v  OUTPUT_VARIABLE DARWIN_VERSION)
-    string(REGEX MATCH "[0-9]+" DARWIN_VERSION ${DARWIN_VERSION})
-    message(STATUS "macOS Darwin version: ${DARWIN_VERSION}")
-    if(DARWIN_VERSION GREATER 9)
-      set(APPLE_OPENMP_SUCKS 1)
-    endif(DARWIN_VERSION GREATER 9)
-    execute_process(COMMAND ${CMAKE_C_COMPILER} -dumpversion
-      OUTPUT_VARIABLE GCC_VERSION)
-    if(APPLE_OPENMP_SUCKS AND GCC_VERSION VERSION_LESS 4.6.2)
-      message(WARNING "Disabling OpenMP (unstable with this version of GCC). "
-        "Install GCC >= 4.6.2 or change your OS to enable OpenMP.")
-      add_compile_options(-Wno-unknown-pragmas)
-      set(WITH_OPENMP OFF CACHE BOOL "OpenMP support if available?" FORCE)
-    endif()
-  endif()
-
-  if("${CMAKE_CXX_SIMULATE_ID}" STREQUAL "MSVC"
-    AND "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-    message(STATUS "Setting OpenMP flags for clang-cl")
-    set(OpenMP_CXX_FLAGS "-Xclang -fopenmp")
-    set(OpenMP_C_FLAGS "-Xclang -fopenmp")
-    set(CHECKED_OPENMP ON CACHE BOOL "already checked for OpenMP")
-    set(OPENMP_FOUND ON CACHE BOOL "OpenMP Support found")
-    if(NOT MKL_FOUND)
-      execute_process(COMMAND ${CMAKE_CXX_COMPILER} --version OUTPUT_VARIABLE clang_version_output)
-      string(REGEX REPLACE ".*InstalledDir: ([^\n]+).*" "\\1" CLANG_BINDIR ${clang_version_output})
-
-      get_filename_component(CLANG_ROOT ${CLANG_BINDIR} DIRECTORY)
-      set(CLANG_OPENMP_LIBRARY "${CLANG_ROOT}/lib/libiomp5md.lib")
-
-      if(NOT TARGET caffe2::openmp)
-        add_library(caffe2::openmp INTERFACE IMPORTED)
-      endif()
-
-      set_property(
-        TARGET caffe2::openmp PROPERTY INTERFACE_LINK_LIBRARIES
-        ${CLANG_OPENMP_LIBRARY})
-
-      list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS caffe2::openmp)
-    endif()
-  endif()
-
-  if(WITH_OPENMP AND NOT CHECKED_OPENMP)
-    find_package(OpenMP QUIET)
-    set(CHECKED_OPENMP ON CACHE BOOL "already checked for OpenMP")
-
-    # OPENMP_FOUND is not cached in FindOpenMP.cmake (all other variables are cached)
-    # see https://github.com/Kitware/CMake/blob/master/Modules/FindOpenMP.cmake
-    set(OPENMP_FOUND ${OPENMP_FOUND} CACHE BOOL "OpenMP Support found")
-  endif()
-
+if(USE_OPENMP AND NOT TARGET caffe2::openmp)
+  include(${CMAKE_CURRENT_LIST_DIR}/Modules/FindOpenMP.cmake)
   if(OPENMP_FOUND)
     message(STATUS "Adding OpenMP CXX_FLAGS: " ${OpenMP_CXX_FLAGS})
-    if("${OpenMP_CXX_LIBRARIES}" STREQUAL "")
-        message(STATUS "No OpenMP library needs to be linked against")
-    else()
-        message(STATUS "Will link against OpenMP libraries: ${OpenMP_CXX_LIBRARIES}")
+    if(APPLE AND USE_MPS)
+      string(APPEND CMAKE_OBJCXX_FLAGS " ${OpenMP_CXX_FLAGS}")
     endif()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+    if(OpenMP_CXX_LIBRARIES)
+      message(STATUS "Will link against OpenMP libraries: ${OpenMP_CXX_LIBRARIES}")
+    endif()
+    add_library(caffe2::openmp INTERFACE IMPORTED)
+    target_link_libraries(caffe2::openmp INTERFACE OpenMP::OpenMP_CXX)
+    list(APPEND Caffe2_DEPENDENCY_LIBS caffe2::openmp)
+    if(MSVC AND OpenMP_CXX_LIBRARIES MATCHES ".*libiomp5md\\.lib.*")
+      target_compile_definitions(caffe2::openmp INTERFACE _OPENMP_NOFORCE_MANIFEST)
+      target_link_options(caffe2::openmp INTERFACE "/NODEFAULTLIB:vcomp")
+    endif()
   else()
     message(WARNING "Not compiling with OpenMP. Suppress this warning with -DUSE_OPENMP=OFF")
     caffe2_update_option(USE_OPENMP OFF)
@@ -1231,9 +1194,20 @@ if(USE_OPENMP)
 endif()
 
 
+
 # ---[ Android specific ones
 if(ANDROID)
   list(APPEND Caffe2_DEPENDENCY_LIBS log)
+endif()
+
+# ---[ Kernel asserts
+# Kernel asserts are enabled by default for CUDA and disabled for ROCm.
+# For ROCm, it can be enabled by setting ROCM_FORCE_ENABLE_GPU_ASSERTS
+if(USE_ROCM AND ROCM_FORCE_ENABLE_GPU_ASSERTS)
+  message(STATUS "Forcefully enabling kernel asserts on ROCM")
+elseif(USE_ROCM AND NOT ROCM_FORCE_ENABLE_GPU_ASSERTS)
+  message(STATUS "Disabling kernel asserts for ROCm")
+  caffe2_update_option(TORCH_DISABLE_GPU_ASSERTS ON)
 endif()
 
 # ---[ LLVM
@@ -1253,11 +1227,26 @@ endif(USE_LLVM)
 # ---[ cuDNN
 if(USE_CUDNN)
   set(CUDNN_FRONTEND_INCLUDE_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/cudnn_frontend/include)
-  include_directories(${CUDNN_FRONTEND_INCLUDE_DIR})
+  target_include_directories(torch::cudnn INTERFACE ${CUDNN_FRONTEND_INCLUDE_DIR})
 endif()
 
 # ---[ HIP
 if(USE_ROCM)
+  # This prevents linking in the libtinfo from /opt/conda/lib which conflicts with ROCm libtinfo.
+  # Currently only active for Ubuntu 20.04 and greater versions.
+  if(UNIX AND EXISTS "/etc/os-release")
+    file(STRINGS /etc/os-release OS_RELEASE)
+    string(REGEX REPLACE "NAME=\"([A-Za-z]+).*" "\\1" OS_DISTRO ${OS_RELEASE})
+    string(REGEX REPLACE ".*VERSION_ID=\"([0-9\.]+).*" "\\1" OS_VERSION ${OS_RELEASE})
+    if(OS_DISTRO STREQUAL "Ubuntu" AND OS_VERSION VERSION_GREATER_EQUAL "20.04")
+      find_library(LIBTINFO_LOC tinfo NO_CMAKE_PATH NO_CMAKE_ENVIRONMENT_PATH)
+      if(LIBTINFO_LOC)
+        get_filename_component(LIBTINFO_LOC_PARENT ${LIBTINFO_LOC} DIRECTORY)
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath-link,${LIBTINFO_LOC_PARENT}")
+      endif()
+    endif()
+  endif()
+
   include(${CMAKE_CURRENT_LIST_DIR}/public/LoadHIP.cmake)
   if(PYTORCH_FOUND_HIP)
     message(INFO "Compiling with HIP for AMD.")
@@ -1271,20 +1260,16 @@ if(USE_ROCM)
     list(APPEND HIP_CXX_FLAGS -fPIC)
     list(APPEND HIP_CXX_FLAGS -D__HIP_PLATFORM_HCC__=1)
     list(APPEND HIP_CXX_FLAGS -DCUDA_HAS_FP16=1)
+    list(APPEND HIP_CXX_FLAGS -DUSE_ROCM)
     list(APPEND HIP_CXX_FLAGS -D__HIP_NO_HALF_OPERATORS__=1)
     list(APPEND HIP_CXX_FLAGS -D__HIP_NO_HALF_CONVERSIONS__=1)
     list(APPEND HIP_CXX_FLAGS -DTORCH_HIP_VERSION=${TORCH_HIP_VERSION})
-    list(APPEND HIP_CXX_FLAGS -Wno-macro-redefined)
-    list(APPEND HIP_CXX_FLAGS -Wno-inconsistent-missing-override)
-    list(APPEND HIP_CXX_FLAGS -Wno-exceptions)
     list(APPEND HIP_CXX_FLAGS -Wno-shift-count-negative)
     list(APPEND HIP_CXX_FLAGS -Wno-shift-count-overflow)
-    list(APPEND HIP_CXX_FLAGS -Wno-unused-command-line-argument)
     list(APPEND HIP_CXX_FLAGS -Wno-duplicate-decl-specifier)
-    list(APPEND HIP_CXX_FLAGS -Wno-implicit-int-float-conversion)
     list(APPEND HIP_CXX_FLAGS -DCAFFE2_USE_MIOPEN)
     list(APPEND HIP_CXX_FLAGS -DTHRUST_DEVICE_SYSTEM=THRUST_DEVICE_SYSTEM_HIP)
-    list(APPEND HIP_CXX_FLAGS -std=c++14)
+    list(APPEND HIP_CXX_FLAGS -std=c++17)
     add_definitions(-DROCM_VERSION=${ROCM_VERSION_DEV_INT})
     add_definitions(-DTORCH_HIP_VERSION=${TORCH_HIP_VERSION})
     message("TORCH_HIP_VERSION=${TORCH_HIP_VERSION} is added as a compiler defines")
@@ -1300,7 +1285,7 @@ if(USE_ROCM)
     # host linker to link.
     list(APPEND HIP_CLANG_FLAGS -fno-gpu-rdc)
     foreach(pytorch_rocm_arch ${PYTORCH_ROCM_ARCH})
-      list(APPEND HIP_CLANG_FLAGS --amdgpu-target=${pytorch_rocm_arch})
+      list(APPEND HIP_CLANG_FLAGS --offload-arch=${pytorch_rocm_arch})
     endforeach()
 
     set(Caffe2_HIP_INCLUDE
@@ -1309,38 +1294,25 @@ if(USE_ROCM)
     hip_include_directories(${Caffe2_HIP_INCLUDE})
 
     set(Caffe2_PUBLIC_HIP_DEPENDENCY_LIBS
-      ${PYTORCH_HIP_HCC_LIBRARIES} ${PYTORCH_MIOPEN_LIBRARIES} ${PYTORCH_RCCL_LIBRARIES} ${hipcub_LIBRARIES} ${ROCM_HIPRTC_LIB} ${ROCM_ROCTX_LIB})
+      ${PYTORCH_HIP_HCC_LIBRARIES} ${PYTORCH_MIOPEN_LIBRARIES} ${hipcub_LIBRARIES} ${ROCM_HIPRTC_LIB} ${ROCM_ROCTX_LIB})
 
-    # Note [rocblas & rocfft cmake bug]
-    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    # TODO: There is a bug in rocblas's & rocfft's cmake files that exports the wrong targets name in ${rocblas_LIBRARIES}
-    # If you get this wrong, you'll get a complaint like 'ld: cannot find -lrocblas-targets'
-    if(ROCM_VERSION_DEV VERSION_GREATER_EQUAL "4.1.0")
-      list(APPEND Caffe2_PUBLIC_HIP_DEPENDENCY_LIBS
-        roc::rocblas hip::hipfft hip::hiprand roc::hipsparse)
-    else()
-      list(APPEND Caffe2_PUBLIC_HIP_DEPENDENCY_LIBS
-        roc::rocblas roc::rocfft hip::hiprand roc::hipsparse)
-    endif()
+    list(APPEND Caffe2_PUBLIC_HIP_DEPENDENCY_LIBS
+      roc::hipblas hip::hipfft hip::hiprand roc::hipsparse roc::hipsolver)
+
   else()
     caffe2_update_option(USE_ROCM OFF)
   endif()
 endif()
 
 # ---[ ROCm
-if(USE_ROCM)
+if(USE_ROCM AND ROCM_VERSION_DEV VERSION_LESS "5.2.0")
   # We check again for USE_ROCM because it might have been set to OFF
   # in the if above
   include_directories(SYSTEM ${HIP_PATH}/include)
-  include_directories(SYSTEM ${ROCBLAS_PATH}/include)
-  if(ROCM_VERSION_DEV VERSION_GREATER_EQUAL "4.1.0")
-    include_directories(SYSTEM ${HIPFFT_PATH}/include)
-  else()
-    include_directories(SYSTEM ${ROCFFT_PATH}/include)
-  endif()
+  include_directories(SYSTEM ${HIPBLAS_PATH}/include)
+  include_directories(SYSTEM ${HIPFFT_PATH}/include)
   include_directories(SYSTEM ${HIPSPARSE_PATH}/include)
   include_directories(SYSTEM ${HIPRAND_PATH}/include)
-  include_directories(SYSTEM ${ROCRAND_PATH}/include)
   include_directories(SYSTEM ${THRUST_PATH})
 endif()
 
@@ -1363,6 +1335,16 @@ if(USE_NCCL)
   endif()
 endif()
 
+# ---[ UCC
+if(USE_UCC)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(WARNING "UCC is currently only supported under Linux.")
+    caffe2_update_option(USE_UCC OFF)
+  else()
+    include(${CMAKE_CURRENT_LIST_DIR}/External/ucc.cmake)
+  endif()
+endif()
+
 # ---[ CUB
 if(USE_CUDA)
   find_package(CUB)
@@ -1373,18 +1355,41 @@ if(USE_CUDA)
   endif()
 endif()
 
+if(USE_DISTRIBUTED AND USE_TENSORPIPE)
+  if(MSVC)
+    message(WARNING "Tensorpipe cannot be used on Windows.")
+  else()
+    if(USE_CUDA)
+      set(TP_USE_CUDA ON CACHE BOOL "" FORCE)
+      set(TP_ENABLE_CUDA_IPC ON CACHE BOOL "" FORCE)
+    endif()
+    set(TP_BUILD_LIBUV ON CACHE BOOL "" FORCE)
+    add_compile_options(-DTORCH_USE_LIBUV)
+    include_directories(BEFORE SYSTEM ${CMAKE_CURRENT_LIST_DIR}/../third_party/tensorpipe/third_party/libuv/include)
+    set(TP_STATIC_OR_SHARED STATIC CACHE STRING "" FORCE)
+
+    # Tensorpipe uses cuda_add_library
+    torch_update_find_cuda_flags()
+    add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/tensorpipe)
+
+    list(APPEND Caffe2_DEPENDENCY_LIBS tensorpipe)
+    if(USE_CUDA)
+      list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS tensorpipe_cuda)
+    elseif(USE_ROCM)
+      message(WARNING "TensorPipe doesn't yet support ROCm")
+      # Not yet...
+      # list(APPEND Caffe2_HIP_DEPENDENCY_LIBS tensorpipe_hip)
+    endif()
+  endif()
+endif()
+
 if(USE_GLOO)
   if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(WARNING "Gloo can only be used on 64-bit systems.")
     caffe2_update_option(USE_GLOO OFF)
   else()
-    if(MSVC)
-      # Don't install gloo on Windows
-      # It is already handled in builder scripts
-      set(GLOO_INSTALL OFF CACHE BOOL "" FORCE)
-    else()
-      set(GLOO_INSTALL ON CACHE BOOL "" FORCE)
-    endif()
+    # Don't install gloo
+    set(GLOO_INSTALL OFF CACHE BOOL "" FORCE)
     set(GLOO_STATIC_OR_SHARED STATIC CACHE STRING "" FORCE)
 
     # Temporarily override variables to avoid building Gloo tests/benchmarks
@@ -1396,8 +1401,16 @@ if(USE_GLOO)
       set(ENV{GLOO_ROCM_ARCH} "${PYTORCH_ROCM_ARCH}")
     endif()
     if(NOT USE_SYSTEM_GLOO)
-      # gloo uses cuda_add_library
-      torch_update_find_cuda_flags()
+      if(USE_DISTRIBUED AND USE_TENSORPIPE)
+        get_target_property(_include_dirs uv_a INCLUDE_DIRECTORIES)
+        set_target_properties(uv_a PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${_include_dirs}")
+      endif()
+      if(USE_NCCL AND NOT USE_SYSTEM_NCCL)
+        # Tell Gloo build system to use bundled NCCL, see
+        # https://github.com/facebookincubator/gloo/blob/950c0e23819779a9e0c70b861db4c52b31d1d1b2/cmake/Dependencies.cmake#L123
+        set(NCCL_EXTERNAL ON)
+      endif()
+      set(GLOO_USE_CUDA_TOOLKIT ON CACHE BOOL "" FORCE)
       add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../third_party/gloo)
     else()
       add_library(gloo SHARED IMPORTED)
@@ -1430,32 +1443,6 @@ if(USE_GLOO)
       list(APPEND Caffe2_HIP_DEPENDENCY_LIBS gloo_hip)
     endif()
     add_compile_options(-DCAFFE2_USE_GLOO)
-  endif()
-endif()
-
-if(USE_DISTRIBUTED AND USE_TENSORPIPE)
-  if(MSVC)
-    message(WARNING "Tensorpipe cannot be used on Windows.")
-  else()
-    if(USE_CUDA)
-      set(TP_USE_CUDA ON CACHE BOOL "" FORCE)
-      set(TP_ENABLE_CUDA_IPC ON CACHE BOOL "" FORCE)
-    endif()
-    set(TP_BUILD_LIBUV ON CACHE BOOL "" FORCE)
-    set(TP_STATIC_OR_SHARED STATIC CACHE STRING "" FORCE)
-
-    # Tensorpipe uses cuda_add_library
-    torch_update_find_cuda_flags()
-    add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/tensorpipe)
-
-    list(APPEND Caffe2_DEPENDENCY_LIBS tensorpipe)
-    if(USE_CUDA)
-      list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS tensorpipe_cuda)
-    elseif(USE_ROCM)
-      message(WARNING "TensorPipe doesn't yet support ROCm")
-      # Not yet...
-      # list(APPEND Caffe2_HIP_DEPENDENCY_LIBS tensorpipe_hip)
-    endif()
   endif()
 endif()
 
@@ -1505,10 +1492,22 @@ if(NOT INTERN_BUILD_MOBILE AND BUILD_CAFFE2_OPS)
 endif()
 
 if(USE_ZSTD)
-  list(APPEND Caffe2_DEPENDENCY_LIBS libzstd_static)
-  include_directories(SYSTEM ${CMAKE_CURRENT_LIST_DIR}/../third_party/zstd/lib)
-  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../third_party/zstd/build/cmake)
-  set_property(TARGET libzstd_static PROPERTY POSITION_INDEPENDENT_CODE ON)
+  if(USE_SYSTEM_ZSTD)
+    find_package(zstd REQUIRED)
+    if(TARGET zstd::libzstd_shared)
+      set(ZSTD_TARGET zstd::libzstd_shared)
+    else()
+      set(ZSTD_TARGET zstd::libzstd_static)
+    endif()
+    list(APPEND Caffe2_DEPENDENCY_LIBS ${ZSTD_TARGET})
+    get_property(ZSTD_INCLUDE_DIR TARGET ${ZSTD_TARGET} PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
+    include_directories(SYSTEM ${ZSTD_INCLUDE_DIR})
+  else()
+    list(APPEND Caffe2_DEPENDENCY_LIBS libzstd_static)
+    include_directories(SYSTEM ${CMAKE_CURRENT_LIST_DIR}/../third_party/zstd/lib)
+    add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../third_party/zstd/build/cmake)
+    set_property(TARGET libzstd_static PROPERTY POSITION_INDEPENDENT_CODE ON)
+  endif()
 endif()
 
 # ---[ Onnx
@@ -1534,6 +1533,9 @@ if(CAFFE2_CMAKE_BUILDING_WITH_MAIN_REPO AND NOT INTERN_DISABLE_ONNX)
   add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../caffe2/onnx/torch_ops")
   if(NOT USE_SYSTEM_ONNX)
     add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../third_party/onnx EXCLUDE_FROM_ALL)
+    if(NOT MSVC)
+      set_target_properties(onnx_proto PROPERTIES CXX_STANDARD 17)
+    endif()
   endif()
   add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../third_party/foxi EXCLUDE_FROM_ALL)
 
@@ -1580,10 +1582,8 @@ function(add_onnx_tensorrt_subdir)
   set(CUDNN_INCLUDE_DIR "${CUDNN_INCLUDE_PATH}")
   set(CUDNN_LIBRARY "${CUDNN_LIBRARY_PATH}")
   set(CMAKE_VERSION_ORIG "{CMAKE_VERSION}")
-  if(FIND_CUDA_MODULE_DEPRECATED)
-    # TODO: this WAR is for https://github.com/pytorch/pytorch/issues/18524
-    set(CMAKE_VERSION "3.9.0")
-  endif()
+  # TODO: this WAR is for https://github.com/pytorch/pytorch/issues/18524
+  set(CMAKE_VERSION "3.9.0")
   add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../third_party/onnx-tensorrt EXCLUDE_FROM_ALL)
   set(CMAKE_VERSION "{CMAKE_VERSION_ORIG}")
 endfunction()
@@ -1629,19 +1629,7 @@ if(NOT INTERN_BUILD_MOBILE)
     string(APPEND CMAKE_CUDA_FLAGS " -Xcompiler=/wd4819,/wd4503,/wd4190,/wd4244,/wd4251,/wd4275,/wd4522")
   endif()
 
-  if(NOT MSVC)
-    if(CMAKE_VERSION VERSION_LESS "3.1")
-      set(CMAKE_C_FLAGS "-std=c11 ${CMAKE_C_FLAGS}")
-    else()
-      set(CMAKE_C_STANDARD 11)
-    endif()
-  endif()
-
   string(APPEND CMAKE_CUDA_FLAGS " -Wno-deprecated-gpu-targets --expt-extended-lambda")
-
-  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(CMAKE_CXX_STANDARD 14)
-  endif()
 
   # use cub in a safe manner, see:
   # https://github.com/pytorch/pytorch/pull/55292
@@ -1649,16 +1637,12 @@ if(NOT INTERN_BUILD_MOBILE)
     string(APPEND CMAKE_CUDA_FLAGS " -DCUB_WRAPPED_NAMESPACE=at_cuda_detail")
   endif()
 
-  if(CUDA_HAS_FP16 OR NOT ${CUDA_VERSION} LESS 7.5)
-    message(STATUS "Found CUDA with FP16 support, compiling with torch.cuda.HalfTensor")
-    string(APPEND CMAKE_CUDA_FLAGS " -DCUDA_HAS_FP16=1"
-                                   " -D__CUDA_NO_HALF_OPERATORS__"
-                                   " -D__CUDA_NO_HALF_CONVERSIONS__"
-                                   " -D__CUDA_NO_HALF2_OPERATORS__"
-                                   " -D__CUDA_NO_BFLOAT16_CONVERSIONS__")
-  else()
-    message(STATUS "Could not find CUDA with FP16 support, compiling without torch.CudaHalfTensor")
-  endif()
+  message(STATUS "Found CUDA with FP16 support, compiling with torch.cuda.HalfTensor")
+  string(APPEND CMAKE_CUDA_FLAGS " -DCUDA_HAS_FP16=1"
+                                 " -D__CUDA_NO_HALF_OPERATORS__"
+                                 " -D__CUDA_NO_HALF_CONVERSIONS__"
+                                 " -D__CUDA_NO_HALF2_OPERATORS__"
+                                 " -D__CUDA_NO_BFLOAT16_CONVERSIONS__")
 
   string(APPEND CMAKE_C_FLAGS_RELEASE " -DNDEBUG")
   string(APPEND CMAKE_CXX_FLAGS_RELEASE " -DNDEBUG")
@@ -1703,8 +1687,13 @@ if(NOT INTERN_BUILD_MOBILE)
     message(STATUS "asimd/Neon found with compiler flag : -D__NEON__")
     add_compile_options(-D__NEON__)
   elseif(NEON_FOUND)
-    message(STATUS "Neon found with compiler flag : -mfpu=neon -D__NEON__")
-    add_compile_options(-mfpu=neon -D__NEON__)
+    if(APPLE)
+      message(STATUS "Neon found with compiler flag : -D__NEON__")
+      add_compile_options(-D__NEON__)
+    else()
+      message(STATUS "Neon found with compiler flag : -mfpu=neon -D__NEON__")
+      add_compile_options(-mfpu=neon -D__NEON__)
+    endif()
   endif()
   if(CORTEXA8_FOUND)
     message(STATUS "Cortex-A8 Found with compiler flag : -mcpu=cortex-a8")
@@ -1733,17 +1722,6 @@ if(NOT INTERN_BUILD_MOBILE)
     set(AT_CUDA_ENABLED 1)
   endif()
 
-  if(NOT USE_CUDNN)
-    message(STATUS "USE_CUDNN is set to 0. Compiling without cuDNN support")
-    set(AT_CUDNN_ENABLED 0)
-  elseif(NOT CUDNN_FOUND)
-    message(WARNING "CuDNN not found. Compiling without CuDNN support")
-    set(AT_CUDNN_ENABLED 0)
-  else()
-    include_directories(SYSTEM ${CUDNN_INCLUDE_PATH})
-    set(AT_CUDNN_ENABLED 1)
-  endif()
-
   if(NOT USE_ROCM)
     message("disabling ROCM because NOT USE_ROCM is set")
     message(STATUS "MIOpen not found. Compiling without MIOpen support")
@@ -1754,7 +1732,7 @@ if(NOT INTERN_BUILD_MOBILE)
   endif()
 
   set(AT_MKLDNN_ENABLED 0)
-  set(CAFFE2_USE_MKLDNN OFF)
+  set(AT_MKLDNN_ACL_ENABLED 0)
   if(USE_MKLDNN)
     if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
       message(WARNING
@@ -1763,6 +1741,9 @@ if(NOT INTERN_BUILD_MOBILE)
         "Turn this warning off by USE_MKLDNN=OFF.")
       set(USE_MKLDNN OFF)
     endif()
+    if(USE_MKLDNN_ACL)
+      set(AT_MKLDNN_ACL_ENABLED 1)
+    endif()
   endif()
   if(USE_MKLDNN)
     include(${CMAKE_CURRENT_LIST_DIR}/public/mkldnn.cmake)
@@ -1770,11 +1751,11 @@ if(NOT INTERN_BUILD_MOBILE)
       set(AT_MKLDNN_ENABLED 1)
       include_directories(AFTER SYSTEM ${MKLDNN_INCLUDE_DIR})
       if(BUILD_CAFFE2_OPS)
-        set(CAFFE2_USE_MKLDNN ON)
-        list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS caffe2::mkldnn)
+        list(APPEND Caffe2_DEPENDENCY_LIBS caffe2::mkldnn)
       endif(BUILD_CAFFE2_OPS)
     else()
       message(WARNING "MKLDNN could not be found.")
+      caffe2_update_option(USE_MKLDNN OFF)
     endif()
   else()
     message("disabling MKLDNN because USE_MKLDNN is not set")
@@ -1815,17 +1796,7 @@ if(NOT INTERN_BUILD_MOBILE)
   add_definitions(-DUSE_EXTERNAL_MZCRC)
   add_definitions(-DMINIZ_DISABLE_ZIP_READER_CRC32_CHECKS)
 
-  # Is __thread supported?
-  if(NOT MSVC)
-    CHECK_C_SOURCE_COMPILES("static __thread int x = 1; int main() { return x; }" C_HAS_THREAD)
-  else(NOT MSVC)
-    CHECK_C_SOURCE_COMPILES("static __declspec( thread ) int x = 1; int main() { return x; }" C_HAS_THREAD)
-  endif(NOT MSVC)
-  if(NOT C_HAS_THREAD)
-    message(STATUS "Warning: __thread is not supported, generating thread-unsafe code")
-  else(NOT C_HAS_THREAD)
-    add_compile_options(-DTH_HAVE_THREAD)
-  endif(NOT C_HAS_THREAD)
+  find_package(ZVECTOR) # s390x simd support
 endif()
 
 #
@@ -1846,10 +1817,6 @@ set_target_properties(fmt-header-only PROPERTIES INTERFACE_COMPILE_FEATURES "")
 
 list(APPEND Caffe2_DEPENDENCY_LIBS fmt::fmt-header-only)
 set(BUILD_SHARED_LIBS ${TEMP_BUILD_SHARED_LIBS} CACHE BOOL "Build shared libs" FORCE)
-
-if(USE_BREAKPAD)
-  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../third_party/breakpad)
-endif()
 
 # ---[ Kineto
 # edge profiler depends on KinetoProfiler but it only does cpu
@@ -1910,7 +1877,9 @@ if(USE_KINETO)
     find_library(CUPTI_LIBRARY_PATH ${CUPTI_LIB_NAME} PATHS
         ${CUDA_SOURCE_DIR}
         ${CUDA_SOURCE_DIR}/extras/CUPTI/lib64
-        ${CUDA_SOURCE_DIR}/lib64)
+        ${CUDA_SOURCE_DIR}/lib
+        ${CUDA_SOURCE_DIR}/lib64
+        NO_DEFAULT_PATH)
 
     find_path(CUPTI_INCLUDE_DIR cupti.h PATHS
         ${CUDA_SOURCE_DIR}/extras/CUPTI/include
@@ -1933,7 +1902,7 @@ if(USE_KINETO)
         include(CheckCXXSourceRuns)
         # rt is handled by the CMAKE_REQUIRED_LIBRARIES set above
         if(NOT APPLE)
-          set(CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES} "dl")
+          set(CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES} "dl" "pthread")
         endif()
         set(CMAKE_REQUIRED_LINK_OPTIONS "-Wl,--whole-archive,${CUPTI_LIBRARY_PATH},--no-whole-archive")
         check_cxx_source_runs("#include <stdexcept>
@@ -1971,6 +1940,11 @@ if(USE_KINETO)
   string(APPEND CMAKE_CXX_FLAGS " -DUSE_KINETO")
   if(LIBKINETO_NOCUPTI)
     string(APPEND CMAKE_CXX_FLAGS " -DLIBKINETO_NOCUPTI")
+  endif()
+  if(LIBKINETO_NOROCTRACER)
+    string(APPEND CMAKE_CXX_FLAGS " -DLIBKINETO_NOROCTRACER")
+  endif()
+  if(LIBKINETO_NOCUPTI AND LIBKINETO_NOROCTRACER)
     message(STATUS "Configured Kineto (CPU)")
   else()
     message(STATUS "Configured Kineto")

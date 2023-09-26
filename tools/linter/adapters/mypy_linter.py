@@ -1,5 +1,4 @@
 import argparse
-import concurrent.futures
 import json
 import logging
 import os
@@ -8,6 +7,7 @@ import subprocess
 import sys
 import time
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Pattern
 
 
@@ -55,6 +55,17 @@ RESULTS_RE: Pattern[str] = re.compile(
     """
 )
 
+# torch/_dynamo/variables/tensor.py:363: error: INTERNAL ERROR
+INTERNAL_ERROR_RE: Pattern[str] = re.compile(
+    r"""(?mx)
+    ^
+    (?P<file>.*?):
+    (?P<line>\d+):
+    \s(?P<severity>\S+?):?
+    \s(?P<message>INTERNAL\sERROR.*)
+    $
+    """
+)
 
 
 def run_command(
@@ -68,29 +79,52 @@ def run_command(
     try:
         return subprocess.run(
             args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
         )
     finally:
         end_time = time.monotonic()
         logging.debug("took %dms", (end_time - start_time) * 1000)
 
 
-# Severity is either "error" or "note": https://git.io/JiLOP
+# Severity is either "error" or "note":
+# https://github.com/python/mypy/blob/8b47a032e1317fb8e3f9a818005a6b63e9bf0311/mypy/errors.py#L46-L47
 severities = {
     "error": LintSeverity.ERROR,
     "note": LintSeverity.ADVICE,
 }
 
-def check_file(
-    filename: str,
+
+def check_mypy_installed(code: str) -> List[LintMessage]:
+    cmd = [sys.executable, "-mmypy", "-V"]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return []
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.decode(errors="replace")
+        return [
+            LintMessage(
+                path=None,
+                line=None,
+                char=None,
+                code=code,
+                severity=LintSeverity.ERROR,
+                name="command-failed",
+                original=None,
+                replacement=None,
+                description=f"Could not run '{' '.join(cmd)}': {msg}",
+            )
+        ]
+
+
+def check_files(
+    filenames: List[str],
     config: str,
-    binary: str,
     retries: int,
+    code: str,
 ) -> List[LintMessage]:
     try:
         proc = run_command(
-            [binary, f"--config={config}", filename],
+            [sys.executable, "-mmypy", f"--config={config}"] + filenames,
             extra_env={},
             retries=retries,
         )
@@ -100,18 +134,17 @@ def check_file(
                 path=None,
                 line=None,
                 char=None,
-                code="MYPY",
+                code=code,
                 severity=LintSeverity.ERROR,
                 name="command-failed",
                 original=None,
                 replacement=None,
-                description=(
-                    f"Failed due to {err.__class__.__name__}:\n{err}"
-                ),
+                description=(f"Failed due to {err.__class__.__name__}:\n{err}"),
             )
         ]
     stdout = str(proc.stdout, "utf-8").strip()
-    return [
+    stderr = str(proc.stderr, "utf-8").strip()
+    rc = [
         LintMessage(
             path=match["file"],
             name=match["code"],
@@ -120,24 +153,33 @@ def check_file(
             char=int(match["column"])
             if match["column"] is not None and not match["column"].startswith("-")
             else None,
-            code="MYPY",
+            code=code,
             severity=severities.get(match["severity"], LintSeverity.ERROR),
             original=None,
             replacement=None,
         )
         for match in RESULTS_RE.finditer(stdout)
+    ] + [
+        LintMessage(
+            path=match["file"],
+            name="INTERNAL ERROR",
+            description=match["message"],
+            line=int(match["line"]),
+            char=None,
+            code=code,
+            severity=severities.get(match["severity"], LintSeverity.ERROR),
+            original=None,
+            replacement=None,
+        )
+        for match in INTERNAL_ERROR_RE.finditer(stderr)
     ]
+    return rc
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="mypy wrapper linter.",
         fromfile_prefix_chars="@",
-    )
-    parser.add_argument(
-        "--binary",
-        required=True,
-        help="mypy binary path",
     )
     parser.add_argument(
         "--retries",
@@ -149,6 +191,11 @@ def main() -> None:
         "--config",
         required=True,
         help="path to an mypy .ini config file",
+    )
+    parser.add_argument(
+        "--code",
+        default="MYPY",
+        help="the code this lint should report as",
     )
     parser.add_argument(
         "--verbose",
@@ -172,27 +219,28 @@ def main() -> None:
         stream=sys.stderr,
     )
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=os.cpu_count(),
-        thread_name_prefix="Thread",
-    ) as executor:
-        futures = {
-            executor.submit(
-                check_file,
-                filename,
-                args.config,
-                args.binary,
-                args.retries,
-            ): filename
-            for filename in args.filenames
-        }
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                for lint_message in future.result():
-                    print(json.dumps(lint_message._asdict()), flush=True)
-            except Exception:
-                logging.critical('Failed at "%s".', futures[future])
-                raise
+    # Use a dictionary here to preserve order. mypy cares about order,
+    # tragically, e.g. https://github.com/python/mypy/issues/2015
+    filenames: Dict[str, bool] = {}
+
+    # If a stub file exists, have mypy check it instead of the original file, in
+    # accordance with PEP-484 (see https://www.python.org/dev/peps/pep-0484/#stub-files)
+    for filename in args.filenames:
+        if filename.endswith(".pyi"):
+            filenames[filename] = True
+            continue
+
+        stub_filename = filename.replace(".py", ".pyi")
+        if Path(stub_filename).exists():
+            filenames[stub_filename] = True
+        else:
+            filenames[filename] = True
+
+    lint_messages = check_mypy_installed(args.code) + check_files(
+        list(filenames), args.config, args.retries, args.code
+    )
+    for lint_message in lint_messages:
+        print(json.dumps(lint_message._asdict()), flush=True)
 
 
 if __name__ == "__main__":

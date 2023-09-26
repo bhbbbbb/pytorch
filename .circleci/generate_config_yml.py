@@ -13,12 +13,11 @@ from collections import namedtuple
 import cimodel.data.simple.docker_definitions
 import cimodel.data.simple.mobile_definitions
 import cimodel.data.simple.nightly_ios
-import cimodel.data.simple.anaconda_prune_defintions
 import cimodel.lib.miniutils as miniutils
 import cimodel.lib.miniyaml as miniyaml
 
 
-class File(object):
+class File:
     """
     Verbatim copy the contents of a file into config.yml
     """
@@ -57,7 +56,7 @@ def horizontal_rule():
     return "".join("#" * 78)
 
 
-class Header(object):
+class Header:
     def __init__(self, title, summary=None):
         self.title = title
         self.summary_lines = summary or []
@@ -70,6 +69,7 @@ class Header(object):
         for line in filter(None, lines):
             output_filehandle.write(line + "\n")
 
+
 def _for_all_items(items, functor) -> None:
     if isinstance(items, list):
         for item in items:
@@ -78,17 +78,22 @@ def _for_all_items(items, functor) -> None:
         item_type, item = next(iter(items.items()))
         functor(item_type, item)
 
+
 def filter_master_only_jobs(items):
     def _is_main_or_master_item(item):
-        filters = item.get('filters', None)
-        branches = filters.get('branches', None) if filters is not None else None
-        branches_only = branches.get('only', None) if branches is not None else None
-        return ('main' in branches_only or 'master' in branches_only) if branches_only is not None else False
+        filters = item.get("filters", None)
+        branches = filters.get("branches", None) if filters is not None else None
+        branches_only = branches.get("only", None) if branches is not None else None
+        return (
+            ("main" in branches_only or "master" in branches_only)
+            if branches_only is not None
+            else False
+        )
 
     master_deps = set()
 
     def _save_requires_if_master(item_type, item):
-        requires = item.get('requires', None)
+        requires = item.get("requires", None)
         item_name = item.get("name", None)
         if not isinstance(requires, list):
             return
@@ -105,9 +110,9 @@ def filter_master_only_jobs(items):
         item_name = item_name.strip('"') if item_name is not None else None
         if not _is_main_or_master_item(item) and item_name not in master_deps:
             return None
-        if 'filters' in item:
+        if "filters" in item:
             item = item.copy()
-            item.pop('filters')
+            item.pop("filters")
         return {item_type: item}
 
     # Scan of dependencies twice to pick up nested required jobs
@@ -116,26 +121,27 @@ def filter_master_only_jobs(items):
     _for_all_items(items, _save_requires_if_master)
     return _do_filtering(items)
 
+
 def generate_required_docker_images(items):
     required_docker_images = set()
 
     def _requires_docker_image(item_type, item):
-        requires = item.get('requires', None)
+        requires = item.get("requires", None)
         if not isinstance(requires, list):
             return
         for requirement in requires:
-            requirement = requirement.replace('"', '')
-            if requirement.startswith('docker-'):
+            requirement = requirement.replace('"', "")
+            if requirement.startswith("docker-"):
                 required_docker_images.add(requirement)
 
     _for_all_items(items, _requires_docker_image)
     return required_docker_images
 
+
 def gen_build_workflows_tree():
     build_workflows_functions = [
         cimodel.data.simple.mobile_definitions.get_workflow_jobs,
         cimodel.data.simple.nightly_ios.get_workflow_jobs,
-        cimodel.data.simple.anaconda_prune_defintions.get_workflow_jobs,
     ]
     build_jobs = [f() for f in build_workflows_functions]
     build_jobs.extend(
@@ -170,17 +176,14 @@ YAML_SOURCES = [
     Header("Build parameters"),
     File("build-parameters/pytorch-build-params.yml"),
     File("build-parameters/binary-build-params.yml"),
-    File("build-parameters/promote-build-params.yml"),
     Header("Job specs"),
     File("job-specs/binary-job-specs.yml"),
     File("job-specs/job-specs-custom.yml"),
-    File("job-specs/job-specs-promote.yml"),
     File("job-specs/binary_update_htmls.yml"),
     File("job-specs/binary-build-tests.yml"),
     File("job-specs/docker_jobs.yml"),
     Header("Workflows"),
     Treegen(gen_build_workflows_tree, 0),
-    File("workflows/workflows-promote.yml"),
 ]
 
 
@@ -190,5 +193,4 @@ def stitch_sources(output_filehandle):
 
 
 if __name__ == "__main__":
-
     stitch_sources(sys.stdout)

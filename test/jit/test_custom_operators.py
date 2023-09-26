@@ -41,6 +41,15 @@ class TestCustomOperators(JitTestCase):
         op2 = torch.ops._test.leaky_relu
         self.assertEqual(op, op2)
 
+    def test_getting_invalid_attr(self):
+        for attr in ["__origin__", "__self__"]:
+            with self.assertRaisesRegexWithHighlight(
+                AttributeError,
+                f"Invalid attribute '{attr}' for '_OpNamespace' '_test'",
+                ""
+            ):
+                getattr(torch.ops._test, attr)
+
     def test_simply_calling_an_operator(self):
         input = torch.randn(100)
         output = torch.ops.aten.relu(input)
@@ -123,3 +132,8 @@ graph(%x.1 : Tensor):
 
     def test_generic_list(self):
         self.assertEqual(torch.ops._test.get_first([['hello']]), 'hello')
+
+    # https://github.com/pytorch/pytorch/issues/80508
+    def test_where_no_scalar(self):
+        x = torch.rand(1, 3, 224, 224)
+        torch.ops.aten.where(x > 0.5, -1.5, 1.5)  # does not raise

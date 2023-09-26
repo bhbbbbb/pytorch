@@ -2,13 +2,16 @@
 
 #include <pybind11/pybind11.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
+#include <torch/csrc/utils/pybind.h>
 
 namespace torch {
 namespace throughput_benchmark {
 
-std::ostream& operator<<(std::ostream& os, const BenchmarkExecutionStats& value) {
-    return os << "Average latency / iter (ms): " << value.latency_avg_ms
-              << "\n Total number of iters: " << value.num_iters;
+std::ostream& operator<<(
+    std::ostream& os,
+    const BenchmarkExecutionStats& value) {
+  return os << "Average latency / iter (ms): " << value.latency_avg_ms
+            << "\n Total number of iters: " << value.num_iters;
 }
 
 void ThroughputBenchmark::addInput(py::args args, py::kwargs kwargs) {
@@ -21,27 +24,27 @@ void ThroughputBenchmark::addInput(py::args args, py::kwargs kwargs) {
   }
 }
 
-py::object ThroughputBenchmark::runOnce(py::args&& args, py::kwargs&& kwargs)  {
+py::object ThroughputBenchmark::runOnce(
+    py::args&& args,
+    const py::kwargs& kwargs) {
   CHECK(script_module_.initialized() ^ module_.initialized());
   if (script_module_.initialized()) {
     c10::IValue result;
     {
       pybind11::gil_scoped_release no_gil_guard;
-      result = script_module_.runOnce(std::move(args), std::move(kwargs));
+      result = script_module_.runOnce(std::move(args), kwargs);
     }
     return jit::toPyObject(std::move(result));
   } else {
     CHECK(module_.initialized());
-    return module_.runOnce(std::move(args), std::move(kwargs));
+    return module_.runOnce(std::move(args), kwargs);
   }
 }
 
-ThroughputBenchmark::ThroughputBenchmark(
-    jit::Module script_module)
+ThroughputBenchmark::ThroughputBenchmark(const jit::Module& script_module)
     : script_module_(script_module) {}
 
-ThroughputBenchmark::ThroughputBenchmark(
-    py::object module)
+ThroughputBenchmark::ThroughputBenchmark(py::object module)
     : module_(std::move(module)) {}
 
 BenchmarkExecutionStats ThroughputBenchmark::benchmark(
@@ -54,9 +57,10 @@ BenchmarkExecutionStats ThroughputBenchmark::benchmark(
     return script_module_.benchmark(config);
   } else {
     CHECK(module_.initialized());
-    TORCH_WARN("Starting benchmark on an nn.Module. This can be slow due "
-    "to Python GIL.For proper inference simulation you might want to switch to "
-    "a ScriptModule instead");
+    TORCH_WARN(
+        "Starting benchmark on an nn.Module. This can be slow due "
+        "to Python GIL.For proper inference simulation you might want to switch to "
+        "a ScriptModule instead");
     return module_.benchmark(config);
   }
 }
@@ -73,15 +77,11 @@ void ScriptModuleBenchmark::runOnce(ScriptModuleInput&& input) const {
 template <>
 ScriptModuleOutput ScriptModuleBenchmark::runOnce(
     py::args&& args,
-    py::kwargs&& kwargs) const {
+    const py::kwargs& kwargs) const {
   CHECK(initialized_);
   auto& function = model_.get_method("forward").function();
   ScriptModuleInput stack = jit::createStackForSchema(
-      function.getSchema(),
-      std::move(args),
-      // NOLINTNEXTLINE(performance-move-const-arg)
-      std::move(kwargs),
-      model_._ivalue());
+      function.getSchema(), std::move(args), kwargs, model_._ivalue());
   return function(std::move(stack));
 }
 
@@ -93,7 +93,7 @@ void ModuleBenchmark::runOnce(ModuleInput&& input) const {
 }
 
 template <>
-ModuleOutput ModuleBenchmark::runOnce(py::args&& args, py::kwargs&& kwargs)
+ModuleOutput ModuleBenchmark::runOnce(py::args&& args, const py::kwargs& kwargs)
     const {
   CHECK(initialized_);
   pybind11::gil_scoped_acquire gil_guard;
@@ -105,8 +105,7 @@ void ScriptModuleBenchmark::addInput(py::args&& args, py::kwargs&& kwargs) {
   jit::Stack stack = jit::createStackForSchema(
       model_.get_method("forward").function().getSchema(),
       std::move(args),
-      // NOLINTNEXTLINE(performance-move-const-arg)
-      std::move(kwargs),
+      kwargs,
       model_._ivalue());
   inputs_.emplace_back(std::move(stack));
 }
@@ -139,4 +138,4 @@ ScriptModuleInput cloneInput<ScriptModuleInput>(
 } // namespace detail
 
 } // namespace throughput_benchmark
-} // namepsace torch
+} // namespace torch

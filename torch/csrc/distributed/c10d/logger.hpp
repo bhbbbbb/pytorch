@@ -1,5 +1,5 @@
 #include <c10/util/Logging.h>
-#include <c10d/reducer.hpp>
+#include <torch/csrc/distributed/c10d/reducer.hpp>
 
 #include <mutex>
 
@@ -16,8 +16,7 @@ class TORCH_API Logger {
       int output_device,
       bool broadcast_buffers,
       bool has_sync_bn,
-      bool static_graph
-  );
+      bool static_graph);
 
   void set_static_graph();
 
@@ -42,8 +41,6 @@ class TORCH_API Logger {
   void set_parameter_stats();
   // Get size of each bucket (Bytes).
   std::vector<int64_t> get_bucket_sizes();
-  // Get bucket size limits specified during DDP construction.
-  std::vector<int> get_bucket_size_limits();
   // Get variable indices for each bucket.
   std::vector<std::vector<size_t>> get_per_bucket_variable_indices();
   // Set comm. hook, if used
@@ -64,14 +61,10 @@ class TORCH_API Logger {
       Timer::Event end_event);
 
   // Set the absolute time of the event that has been recorded in reducer.
-  void set_event_time(
-    int64_t& event_time,
-    Timer& timer,
-    Timer::Event event
-  );
+  void set_event_time(int64_t& event_time, Timer& timer, Timer::Event event);
   // Set stats that can be collected only during
   // training loop. It is called at the beginning of forward call
-  // to record the run time stats of sampled iterations that previouly ran.
+  // to record the run time stats of sampled iterations that previously ran.
   // GPU performance stats are collected only for single process
   // single device program and single device module right now.
   // TODO to support single process multiple devices and multi device modules,
@@ -98,7 +91,6 @@ class TORCH_API Logger {
   // if graph was actually static and is a candidate for static graph
   // optimization.
   void log_if_graph_static(bool is_static);
-
 
  private:
   // ddp_logging_data_ is used to hold all the ddp related logging

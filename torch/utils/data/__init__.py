@@ -13,15 +13,16 @@ from torch.utils.data.dataset import (
     ConcatDataset,
     Dataset,
     IterableDataset,
+    StackDataset,
     Subset,
     TensorDataset,
     random_split,
 )
 from torch.utils.data.datapipes.datapipe import (
     DFIterDataPipe,
+    DataChunk,
     IterDataPipe,
     MapDataPipe,
-    DataChunk,
 )
 from torch.utils.data.dataloader import (
     DataLoader,
@@ -39,8 +40,6 @@ from torch.utils.data.datapipes._decorator import (
     runtime_validation,
     runtime_validation_disabled,
 )
-from torch.utils.data.dataloader_experimental import DataLoader2
-from torch.utils.data import communication
 
 __all__ = ['BatchSampler',
            'ChainDataset',
@@ -48,7 +47,6 @@ __all__ = ['BatchSampler',
            'DFIterDataPipe',
            'DataChunk',
            'DataLoader',
-           'DataLoader2',
            'Dataset',
            'DistributedSampler',
            'IterDataPipe',
@@ -57,13 +55,13 @@ __all__ = ['BatchSampler',
            'RandomSampler',
            'Sampler',
            'SequentialSampler',
+           'StackDataset',
            'Subset',
            'SubsetRandomSampler',
            'TensorDataset',
            'WeightedRandomSampler',
            '_DatasetKind',
            'argument_validation',
-           'communication',
            'default_collate',
            'default_convert',
            'functional_datapipe',

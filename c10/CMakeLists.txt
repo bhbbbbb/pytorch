@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 project(c10 CXX)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17 CACHE STRING "The C++ standard whose features are requested to build this target.")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Main build file for the C10 library.
@@ -28,17 +28,21 @@ configure_file(
 file(GLOB C10_SRCS
         *.cpp
         core/*.cpp
-        core/boxing/*.cpp
-        core/boxing/impl/*.cpp
-        core/dispatch/*.cpp
-        core/op_registration/*.cpp
         core/impl/*.cpp
+        core/impl/cow/*.cpp
         mobile/*.cpp
         macros/*.cpp
         util/*.cpp
         )
-file(GLOB_RECURSE C10_ALL_TEST_FILES test/*.cpp)
-file(GLOB_RECURSE C10_HEADERS *.h)
+file(GLOB C10_HEADERS
+        *.h
+        core/*.h
+        core/impl/*.h
+        core/impl/cow/*.h
+        mobile/*.h
+        macros/*.h
+        util/*.h
+        )
 add_library(c10 ${C10_SRCS} ${C10_HEADERS})
 if(HAVE_SOVERSION)
   set_target_properties(c10 PROPERTIES
@@ -51,6 +55,30 @@ if(${COMPILER_SUPPORTS_HIDDEN_VISIBILITY})
   target_compile_options(c10 PRIVATE "-fvisibility=hidden")
 endif()
 
+option(C10_USE_IWYU "Use include-what-you-use to clean up header inclusion" OFF)
+if(C10_USE_IWYU)
+  find_program(iwyu NAMES include-what-you-use)
+  if(iwyu)
+    set(iwyu_cmd
+        "include-what-you-use"
+        "-Xiwyu"
+        "--transitive_includes_only"
+        "-Xiwyu"
+        "--no_fwd_decls"
+        "-Xiwyu"
+        "--prefix_header_includes=keep"
+        "-Xiwyu"
+        "--mapping_file=${CMAKE_CURRENT_LIST_DIR}/../tools/iwyu/all.imp"
+        )
+    set_property(TARGET c10 PROPERTY CXX_INCLUDE_WHAT_YOU_USE ${iwyu_cmd})
+  endif()
+endif()
+
+if(WERROR)
+  target_compile_options_if_supported(c10 PRIVATE "-Werror=sign-compare")
+  target_compile_options_if_supported(c10 PRIVATE "-Werror=shadow")
+endif()
+
 # ---[ Dependency of c10
 if(${USE_GFLAGS})
    target_link_libraries(c10 PUBLIC gflags)
@@ -60,6 +88,15 @@ if(${USE_GLOG})
     target_link_libraries(c10 PUBLIC glog::glog)
 endif()
 target_link_libraries(c10 PRIVATE fmt::fmt-header-only)
+
+if(C10_USE_NUMA)
+  target_include_directories(c10 PRIVATE ${Numa_INCLUDE_DIR})
+  target_link_libraries(c10 PRIVATE ${Numa_LIBRARIES})
+endif()
+
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "s390x")
+    target_link_libraries(c10 PRIVATE cpuinfo)
+endif()
 
 find_package(Backtrace)
 if(Backtrace_FOUND)
@@ -78,6 +115,11 @@ if(USE_NUMA)
   target_link_libraries(c10 PRIVATE ${Numa_LIBRARIES})
 else()
   message(STATUS "don't use NUMA")
+endif()
+
+if(USE_MIMALLOC)
+  target_link_libraries(c10 PRIVATE "mimalloc-static")
+  add_dependencies(c10 mimalloc-static)
 endif()
 
 if(ANDROID)

@@ -6,7 +6,6 @@
 #include "caffe2/core/logging.h"
 #include "caffe2/core/macros.h"
 #include "caffe2/utils/eigen_utils.h"
-#include "caffe2/utils/math.h"
 
 #include <c10/util/irange.h>
 
@@ -50,8 +49,7 @@ std::vector<int> nms_cpu_upright(
   std::vector<int> keep;
   while (order.size() > 0) {
     // exit if already enough proposals
-    // NOLINTNEXTLINE(clang-diagnostic-sign-compare)
-    if (topN >= 0 && keep.size() >= topN) {
+    if (topN >= 0 && keep.size() >= static_cast<size_t>(topN)) {
       break;
     }
 
@@ -127,7 +125,7 @@ std::vector<int> soft_nms_cpu_upright(
   EArrXi pending = AsEArrXt(indices);
   while (pending.size() > 0) {
     // Exit if already enough proposals
-    if (topN >= 0 && keep.size() >= topN) {
+    if (topN >= 0 && keep.size() >= static_cast<unsigned>(topN)) {
       break;
     }
 
@@ -244,7 +242,7 @@ int rotated_rect_intersection_pts(
   rect1.get_vertices(pts1);
   rect2.get_vertices(pts2);
 
-  // Specical case of rect1 == rect2
+  // Special case of rect1 == rect2
   bool same = true;
 
   for (const auto i : c10::irange(4)) {
@@ -373,6 +371,11 @@ int convex_hull_graham(
       q + 1,
       q + num_in,
       [](const Eigen::Vector2f& A, const Eigen::Vector2f& B) -> bool {
+        if (A == B) {
+          // explicit irreflexivity handling to sate
+          // https://fburl.com/strict-weak-ordering
+          return false;
+        }
         float temp = cross_2d(A, B);
         if (fabs(temp) < 1e-6) {
           return A.squaredNorm() < B.squaredNorm();
@@ -414,7 +417,8 @@ int convex_hull_graham(
   // But if we're only interested in getting the area/perimeter of the shape
   // We can simply return.
   if (!shift_to_zero) {
-    for (const auto i : c10::irange(m))q[i] += s;
+    for (const auto i : c10::irange(m))
+      q[i] += s;
   }
 
   return m;
@@ -560,8 +564,7 @@ std::vector<int> nms_cpu_rotated(
   std::vector<int> keep;
   while (order.size() > 0) {
     // exit if already enough proposals
-    // NOLINTNEXTLINE(clang-diagnostic-sign-compare)
-    if (topN >= 0 && keep.size() >= topN) {
+    if (topN >= 0 && keep.size() >= static_cast<size_t>(topN)) {
       break;
     }
 
@@ -626,7 +629,7 @@ std::vector<int> soft_nms_cpu_rotated(
   EArrXi pending = AsEArrXt(indices);
   while (pending.size() > 0) {
     // Exit if already enough proposals
-    if (topN >= 0 && keep.size() >= topN) {
+    if (topN >= 0 && keep.size() >= static_cast<size_t>(topN)) {
       break;
     }
 

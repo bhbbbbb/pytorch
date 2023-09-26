@@ -15,8 +15,7 @@
 #include <arm_neon.h>
 #endif
 
-namespace at {
-namespace native {
+namespace at::native {
 namespace {
 
 struct Arguments final {
@@ -311,7 +310,6 @@ Tensor _convolution_depthwise3x3_winograd(
 
 }  // namespace
 
-REGISTER_DISPATCH(convolution_depthwise3x3_winograd_stub, &_convolution_depthwise3x3_winograd);
+ALSO_REGISTER_AVX512_DISPATCH(convolution_depthwise3x3_winograd_stub, &_convolution_depthwise3x3_winograd);
 
-}  // namespace native
-}  // namespace at
+}  // namespace at::native

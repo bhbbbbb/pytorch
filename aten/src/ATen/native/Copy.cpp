@@ -1,19 +1,33 @@
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/Copy.h>
 
-#include <ATen/ATen.h>
+#include <ATen/core/Tensor.h>
 #include <ATen/Dispatch.h>
-#include <ATen/NativeFunctions.h>
-#include <ATen/native/TensorIterator.h>
+#include <ATen/ExpandUtils.h>
+#include <ATen/FunctionalTensorWrapper.h>
+#include <ATen/TensorIterator.h>
 #include <ATen/native/quantized/Copy.h>
+#include <ATen/native/mps/Copy.h>
 #include <ATen/native/vulkan/ops/Copy.h>
+#include <ATen/native/TensorShape.h>
 #include <ATen/quantized/Quantizer.h>
 #include <ATen/vulkan/Context.h>
 #include <ATen/metal/Context.h>
-#include <ATen/MemoryOverlap.h>
 #include <ATen/NamedTensorUtils.h>
 #include <ATen/Parallel.h>
 #include <c10/util/irange.h>
-#include <torch/library.h>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/_copy_from.h>
+#include <ATen/ops/_propagate_xla_data.h>
+#include <ATen/ops/_propagate_xla_data_native.h>
+#include <ATen/ops/copy_native.h>
+#include <ATen/ops/empty.h>
+#include <ATen/ops/expand_copy.h>
+#endif
 
 #ifdef USE_FBGEMM
 #include <fbgemm/Fbgemm.h>
@@ -35,6 +49,18 @@ bool copy_transpose_valid(const Tensor& self, const Tensor& src) {
       self.numel() >= MIN_SZ;
 }
 
+#if !defined(C10_MOBILE)
+#define _AT_DISPATCH_CP_TYPES(TYPE, NAME, ...)                                   \
+        AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND6(                                  \
+            kComplexHalf, kHalf, kBool, kBFloat16, kFloat8_e5m2, kFloat8_e4m3fn, \
+            TYPE, NAME, __VA_ARGS__)
+#else
+#define _AT_DISPATCH_CP_TYPES(TYPE, NAME, ...)     \
+        AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND4(    \
+            kComplexHalf, kHalf, kBool, kBFloat16, \
+            TYPE, NAME, __VA_ARGS__)
+#endif
+
 // special case copy where tensor is contiguous and src is a transposed matrix
 // This can be generalized to most copies, but it's trickier
 void copy_same_type_transpose_(Tensor& self, const Tensor& src) {
@@ -52,7 +78,7 @@ void copy_same_type_transpose_(Tensor& self, const Tensor& src) {
   // The code below is implemented with the assumption that sizes are equal
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(self.sizes().equals(src.sizes()));
 
-  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND4(kHalf, kBool, kBFloat16, kComplexHalf, self.scalar_type(), "copy_", [&] {
+  _AT_DISPATCH_CP_TYPES(self.scalar_type(), "copy_", [&] {
     scalar_t* sp = src.data_ptr<scalar_t>();
     scalar_t* rp = self.data_ptr<scalar_t>();
     scalar_t* bp = buf.data_ptr<scalar_t>();
@@ -97,7 +123,7 @@ void copy_same_type_transpose_(Tensor& self, const Tensor& src) {
 // (e.g. XLA) may be supported by overriding copy_ and _copy_from.
 bool is_supported_device(Device device) {
   DeviceType device_type = device.type();
-  return device_type == kCPU || device_type == kCUDA || device_type == kHIP || device_type == kVulkan || device_type == kMetal;
+  return device_type == kCPU || device_type == kCUDA || device_type == kHIP || device_type == kVulkan || device_type == kMetal || device_type == kMPS;
 }
 
 } // namespace
@@ -114,12 +140,17 @@ static Tensor & copy_impl(Tensor & self, const Tensor & src, bool non_blocking) 
   // 1. Memory Format for source and destination tensors is contiguous.
   // 2. Device for both the source and destination tensor is CPU.
   // 3. dtype conversion between FP32->FP16 and FP16->FP32.
+  // This checks that self.sizes() == src.sizes() because this code path doesn't
+  // support broadcasting. This also guards against out of bounds memory access
+  // when copying, see fbgemm::Float16ToFloat_ref.
+  // https://github.com/pytorch/pytorch/issues/88543
   #ifdef USE_FBGEMM
     if (((self.dtype() == at::kFloat && src.dtype() == at::kHalf) ||
          (self.dtype() == at::kHalf && src.dtype() == at::kFloat)) &&
         (self.device().is_cpu() && src.device().is_cpu()) &&
         ((self.is_contiguous() && src.is_contiguous()) ||
-         (self.is_non_overlapping_and_dense() && self.strides() == src.strides()))) {
+         (self.is_non_overlapping_and_dense() && self.strides() == src.strides())) &&
+        (self.sizes() == src.sizes())) {
       if (src.dtype() == at::kFloat && self.dtype() == at::kHalf) {
         auto* output_ptr =
             reinterpret_cast<fbgemm::float16*>(self.data_ptr<at::Half>());
@@ -164,7 +195,13 @@ static Tensor & copy_impl(Tensor & self, const Tensor & src, bool non_blocking) 
 
   // Copies into meta self are OK and just ignored (similar to inplace)
   if (self.is_meta()) {
-    // TODO: need to see if there is extra error checking needed
+    auto shape = infer_size_symdimvector(self.sym_sizes(), src.sym_sizes());
+    TORCH_CHECK(
+        self.sym_sizes().equals(shape),
+        "output with shape ",
+        self.sym_sizes(),
+        " doesn't match the broadcast shape ",
+        shape);
     return self;
   }
 
@@ -184,7 +221,7 @@ static Tensor & copy_impl(Tensor & self, const Tensor & src, bool non_blocking) 
   }
 
   if (self.is_quantized() && !src.is_quantized()) {
-    return quantized_copy_from_float_cpu_(self, src);
+    return quantized_copy_from_float_(self, src);
   }
 
   if (self.is_quantized() && src.is_quantized()) {
@@ -210,6 +247,21 @@ static Tensor & copy_impl(Tensor & self, const Tensor & src, bool non_blocking) 
     return at::metal::metal_copy_(self, src);
   }
 
+  // Exit early if self and src are views of the same data
+  const bool is_same_data = (
+      self.is_alias_of(src) &&
+      self.storage_offset() == src.storage_offset() &&
+      self.strides().equals(src.strides()) &&
+      self.sizes().equals(src.sizes()) &&
+      self.scalar_type() == src.scalar_type() &&
+      self.is_conj() == src.is_conj() &&
+      self.is_neg() == src.is_neg()
+    );
+  if (is_same_data) {
+    return self;
+  }
+
+
   auto iter = TensorIteratorConfig()
     .add_output(self)
     .add_input(src)
@@ -227,6 +279,8 @@ static Tensor & copy_impl(Tensor & self, const Tensor & src, bool non_blocking) 
     device_type = kCUDA;
   } else if (iter.device_type(1) == kHIP) {
     device_type = kHIP;
+  } else if (iter.device_type(1) == kMPS) {
+    device_type = kMPS;
   }
 
   // TODO: if we need to, we can also enable this path for quantized tensor
@@ -235,11 +289,26 @@ static Tensor & copy_impl(Tensor & self, const Tensor & src, bool non_blocking) 
     return self;
   }
 
+#ifdef USE_MPS
+  if (self.device().type() == at::kMPS || src.device().type() == at::kMPS) {
+    return at::native::mps::mps_copy_(self, src, non_blocking);
+  }
+#endif
+
   if(!self.is_complex() && src.is_complex()) {
     TORCH_WARN_ONCE("Casting complex values to real discards the imaginary part");
   }
   copy_stub(device_type, iter, non_blocking);
   return self;
+}
+
+Tensor copy(const Tensor& self, const Tensor& src, bool non_blocking) {
+  // copy() is the "functional" form of copy_(). It exists so we can properly functionalize copy_(), but:
+  // (1) It isn't exposed to the frontend (no python bindings)
+  // (2) It isn't exposed to the backend (it's a composite, that decomposes into to() and expand_as() calls.
+  auto r = clone_preserve_strides(self);
+  r.copy_(src, non_blocking);
+  return r;
 }
 
 Tensor& copy_(Tensor& self, const Tensor& src, bool non_blocking) {
@@ -272,6 +341,10 @@ void copy_ignoring_overlaps(const TensorBase &dst, const TensorBase &src) {
       .check_all_same_device(true)
       .build();
   copy_stub(iter.device_type(), iter, /*non_blocking=*/false);
+}
+
+void _propagate_xla_data(const Tensor& input, const Tensor& output) {
+  TORCH_INTERNAL_ASSERT(input.device().type() == kXLA, "This op should only be called by XLA")
 }
 
 DEFINE_DISPATCH(copy_stub);

@@ -1,17 +1,32 @@
-#include <ATen/ATen.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
+#include <ATen/AccumulateType.h>
 #include <ATen/ceil_div.h>
+#include <ATen/Dispatch.h>
 #include <ATen/cuda/Atomic.cuh>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/DeviceUtils.cuh>
 #include <ATen/TensorUtils.h>
-#include <ATen/NativeFunctions.h>
 
-#include <ATen/AccumulateType.h>
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/arange.h>
+#include <ATen/ops/empty.h>
+#include <ATen/ops/empty_like.h>
+#include <ATen/ops/zeros.h>
+#include <ATen/ops/_embedding_bag_native.h>
+#include <ATen/ops/_embedding_bag_forward_only_native.h>
+#include <ATen/ops/_embedding_bag_dense_backward_native.h>
+#include <ATen/ops/_embedding_bag_per_sample_weights_backward_native.h>
+#endif
 
 #include <ATen/cuda/cub.cuh>
 #include <ATen/native/cuda/SortingCommon.cuh>
 #include <ATen/native/cuda/EmbeddingBackwardKernel.cuh>
 #include <ATen/native/cuda/KernelUtils.cuh>
+#include <ATen/native/cuda/block_reduce.cuh>
 
 #include <c10/macros/Macros.h>
 
@@ -19,8 +34,7 @@
 #include <thrust/iterator/reverse_iterator.h>
 #endif
 
-namespace at {
-namespace native {
+namespace at::native {
 
 #if !CUB_SUPPORTS_SCAN_BY_KEY()
 template<typename index_t>
@@ -49,11 +63,11 @@ std::pair<Tensor, Tensor> promoteIndicesAndOffsets(
 // per_sample_weights are contiguous.
 template <typename scalar_t, typename index_t>
 __global__ void EmbeddingBag_updateOutputKernel_max(
-    index_t *input, index_t *offsets, scalar_t *weight, scalar_t *output,
+    const index_t *input, const index_t *offsets, const scalar_t *weight, scalar_t *output,
     index_t *offset2bag, int64_t numIndices, int64_t numBags,
     int64_t featureSize, int64_t weight_stride0, int64_t weight_stride1,
     index_t *bag_size, index_t *max_indices,
-    index_t padding_idx, int64_t vocab_size) {
+    index_t padding_idx, int64_t numRows) {
 
   // the strategy here is that each bag x feature is handled by a single thread
 
@@ -66,7 +80,7 @@ __global__ void EmbeddingBag_updateOutputKernel_max(
     int64_t featureDim = (chunk % chunksPerBag) * blockDim.x + threadIdx.x;
     if (featureDim < featureSize) {
       int64_t bag = chunk / chunksPerBag;
-      scalar_t *weightFeat = weight + featureDim * weight_stride1;
+      const scalar_t *weightFeat = weight + featureDim * weight_stride1;
       int64_t begin = bag == 0 ? 0 : offsets[bag]; // forces first offset to be 0 instead of asserting on it
       int64_t end = (bag < numBags - 1) ? (offsets[bag + 1]) : numIndices;
       CUDA_KERNEL_ASSERT(end >= begin);
@@ -74,8 +88,8 @@ __global__ void EmbeddingBag_updateOutputKernel_max(
       int64_t bag_size_ = 0;
       int64_t maxWord = -1;
       for (int64_t emb = begin; emb < end; emb++) {
-        CUDA_KERNEL_ASSERT(input[emb] >= 0 && input[emb] < vocab_size);
         bool pad = (input[emb] == padding_idx);
+        CUDA_KERNEL_ASSERT(input[emb] < numRows);
         const int64_t weightRow = input[emb] * weight_stride0;
         scalar_t weightValue = weightFeat[weightRow];
         if (bag_size_ == 0 || weightValue > weightFeatMax) {
@@ -99,12 +113,12 @@ __global__ void EmbeddingBag_updateOutputKernel_max(
 // per_sample_weights are contiguous.
 template <typename scalar_t, typename index_t>
 __global__ void EmbeddingBag_updateOutputKernel_sum_mean(
-    index_t *input, index_t *offsets, scalar_t *weight, scalar_t *output,
+    const index_t *input, const index_t *offsets, const scalar_t *weight, scalar_t *output,
     index_t *offset2bag, int64_t numIndices, int64_t numBags,
     int64_t featureSize, int64_t weight_stride0, int64_t weight_stride1,
     int mode, index_t *bag_size,
-    scalar_t* per_sample_weights, int64_t per_sample_weights_stride,
-    index_t padding_idx, int64_t vocab_size) {
+    const scalar_t* per_sample_weights, int64_t per_sample_weights_stride,
+    index_t padding_idx, int64_t numRows) {
 
   // the strategy here is that each bag x feature is handled by a single thread
 
@@ -118,15 +132,15 @@ __global__ void EmbeddingBag_updateOutputKernel_sum_mean(
     int64_t featureDim = (chunk % chunksPerBag) * blockDim.x + threadIdx.x;
     if (featureDim < featureSize) {
       int64_t bag = chunk / chunksPerBag;
-      scalar_t *weightFeat = weight + featureDim * weight_stride1;
+      const scalar_t *weightFeat = weight + featureDim * weight_stride1;
       int64_t begin = bag == 0 ? 0 : offsets[bag]; // forces first offset to be 0 instead of asserting on it
       int64_t end = (bag < numBags - 1) ? (offsets[bag + 1]) : numIndices;
       CUDA_KERNEL_ASSERT(end >= begin);
       accscalar_t weightFeatSum = 0;
       int64_t bag_size_ = 0;
       for (int64_t emb = begin; emb < end; emb++) {
-        CUDA_KERNEL_ASSERT(input[emb] >= 0 && input[emb] < vocab_size);
         bool pad = (input[emb] == padding_idx);
+        CUDA_KERNEL_ASSERT(input[emb] < numRows);
         const int64_t weightRow = input[emb] * weight_stride0;
         scalar_t weightValue = weightFeat[weightRow];
         weightValue = pad ? static_cast<scalar_t>(0) : weightValue;
@@ -180,8 +194,8 @@ Tensor embedding_bag_backward_cuda_sum_avg(
     auto range = at::arange(num_indices, indices.options());
     // int64_t nbits = cuda::cub::get_num_bits(num_weights);
     cuda::cub::radix_sort_pairs(
-      indices.data_ptr<index_t>(), sorted_indices.data_ptr<index_t>(),
-      range.data_ptr<index_t>(), orig_indices.data_ptr<index_t>(),
+      indices.const_data_ptr<index_t>(), sorted_indices.mutable_data_ptr<index_t>(),
+      range.const_data_ptr<index_t>(), orig_indices.mutable_data_ptr<index_t>(),
       num_indices, false/*, 0, nbits*/);
   });
 
@@ -194,8 +208,8 @@ Tensor embedding_bag_backward_cuda_sum_avg(
       // Compute an increasing sequence per unique item in sortedIndices:
       // sorted: 2 5 5 5 7 7 8 9 9
       //  count: 1 1 2 3 1 2 1 1 2
-      auto sorted_data = sorted_indices.data_ptr<index_t>();
-      auto count_data = count.data_ptr<index_t>();
+      auto sorted_data = sorted_indices.const_data_ptr<index_t>();
+      auto count_data = count.mutable_data_ptr<index_t>();
       cuda::cub::inclusive_sum_by_key(
         sorted_data,
         at_cuda_detail::cub::ConstantInputIterator<index_t>(1),
@@ -227,7 +241,7 @@ Tensor embedding_bag_backward_cuda_sum_avg(
 
 template <typename scalar_t, typename index_t>
 __global__ void EmbeddingBag_accGradParametersKernel_max(
-    index_t *max_indices, scalar_t *gradOutput,
+    const index_t *max_indices, const scalar_t *gradOutput,
     scalar_t *gradWeight, int64_t stride, int64_t numBags,
     index_t padding_idx, const index_t numel) {
 
@@ -282,8 +296,8 @@ Tensor embedding_bag_backward_cuda_max(const Tensor &grad,
         AT_DISPATCH_INDEX_TYPES(max_indices.scalar_type(), "embedding_bag_backward_cuda_max", [&] () {
           EmbeddingBag_accGradParametersKernel_max<
               scalar_t, index_t><<<grid, block, 0, stream>>>(
-              max_indices.data_ptr<index_t>(), grad.data_ptr<scalar_t>(),
-              grad_weight.data_ptr<scalar_t>(), stride, numBags,
+              max_indices.const_data_ptr<index_t>(), grad.const_data_ptr<scalar_t>(),
+              grad_weight.mutable_data_ptr<scalar_t>(), stride, numBags,
               padding_idx, grad_weight.numel());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
@@ -323,6 +337,17 @@ _embedding_bag_cuda(const Tensor &weight, const Tensor &indices_,
                    const Tensor &offsets_, const bool scale_grad_by_freq,
                    const int64_t mode, bool sparse, const c10::optional<Tensor>& per_sample_weights_opt,
                    bool include_last_offset, int64_t padding_idx) {
+  TORCH_CHECK(indices_.dim() == 1 || indices_.dim() == 2,
+      "input has to be a 1D or 2D Tensor, but got Tensor of dimension ",
+      indices_.dim());
+  if (indices_.dim() == 1) {
+    TORCH_CHECK(offsets_.dim() == 1,
+        "offsets has to be a 1D Tensor, but got Tensor of dimension ",
+        offsets_.dim());
+  }
+  TORCH_CHECK(weight.dim() == 2,
+      "weight has to be a 2D Tensor, but got Tensor of dimension ",
+      weight.dim());
   // See [Note: hacky wrapper removal for optional tensor]
   c10::MaybeOwned<Tensor> per_sample_weights_maybe_owned = at::borrow_from_optional_tensor(per_sample_weights_opt);
   const Tensor& per_sample_weights = *per_sample_weights_maybe_owned;
@@ -350,7 +375,6 @@ _embedding_bag_cuda(const Tensor &weight, const Tensor &indices_,
     numBags -= 1;
   }
   int64_t featureSize = weight.size(1);
-  int64_t vocabSize = weight.size(0);
 
   auto bag_size = at::empty(offsets.sizes(), indices.options());
   auto offset2bag =
@@ -379,22 +403,22 @@ _embedding_bag_cuda(const Tensor &weight, const Tensor &indices_,
     AT_DISPATCH_INDEX_TYPES(indices.scalar_type(), "embedding_bag_cuda", [&] () {
       if (mode == MODE_MAX) {
         EmbeddingBag_updateOutputKernel_max<scalar_t, index_t><<<grid, block, 0, stream>>>(
-            indices.data_ptr<index_t>(), offsets.data_ptr<index_t>(),
-            weight.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-            offset2bag.data_ptr<index_t>(), numIndices, numBags, featureSize,
-            weight.stride(0), weight.stride(1), bag_size.data_ptr<index_t>(),
-            max_indices.data_ptr<index_t>(),
-            padding_idx, vocabSize);
+            indices.const_data_ptr<index_t>(), offsets.const_data_ptr<index_t>(),
+            weight.const_data_ptr<scalar_t>(), output.mutable_data_ptr<scalar_t>(),
+            offset2bag.mutable_data_ptr<index_t>(), numIndices, numBags, featureSize,
+            weight.stride(0), weight.stride(1), bag_size.mutable_data_ptr<index_t>(),
+            max_indices.mutable_data_ptr<index_t>(),
+            padding_idx, weight.size(0));
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       } else {
         EmbeddingBag_updateOutputKernel_sum_mean<scalar_t, index_t><<<grid, block, 0, stream>>>(
-            indices.data_ptr<index_t>(), offsets.data_ptr<index_t>(),
-            weight.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-            offset2bag.data_ptr<index_t>(), numIndices, numBags, featureSize,
-            weight.stride(0), weight.stride(1), mode, bag_size.data_ptr<index_t>(),
-            per_sample_weights.defined() ? per_sample_weights.data_ptr<scalar_t>() : NULL,
+            indices.const_data_ptr<index_t>(), offsets.const_data_ptr<index_t>(),
+            weight.const_data_ptr<scalar_t>(), output.mutable_data_ptr<scalar_t>(),
+            offset2bag.mutable_data_ptr<index_t>(), numIndices, numBags, featureSize,
+            weight.stride(0), weight.stride(1), mode, bag_size.mutable_data_ptr<index_t>(),
+            per_sample_weights.defined() ? per_sample_weights.const_data_ptr<scalar_t>() : NULL,
             per_sample_weights.defined() ? per_sample_weights.stride(0) : 0,
-            padding_idx, vocabSize);
+            padding_idx, weight.size(0));
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       }
     });
@@ -446,14 +470,6 @@ Tensor _embedding_bag_dense_backward_cuda(const Tensor &grad_, const Tensor &ind
   }
 }
 
-template <typename scalar_t>
-__inline__ __device__
-static scalar_t warpReduceSum(scalar_t val) {
-  for (int offset = C10_WARP_SIZE/2; offset > 0; offset /= 2)
-    val += WARP_SHFL_DOWN(val, offset);
-  return val;
-}
-
 template <typename scalar_t, typename index_t>
 __global__ static void _embedding_bag_per_sample_weights_backward_kernel(
     const scalar_t* grad, int64_t grad_stride0, int64_t grad_stride1,
@@ -484,7 +500,7 @@ __global__ static void _embedding_bag_per_sample_weights_backward_kernel(
             weight[weight_stride0 * embedding_idx + weight_stride1 * feature_idx];
       }
     }
-    result = warpReduceSum<accscalar_t>(result);
+    result = cuda_utils::WarpReduceSum<accscalar_t>(result);
     if (thread_in_warp == 0) {
       output[sample_idx] = result;
     }
@@ -533,13 +549,13 @@ Tensor _embedding_bag_per_sample_weights_backward_cuda(
       AT_DISPATCH_INDEX_TYPES(indices.scalar_type(), "_embedding_bag_per_sample_weights_backward_cuda", [&]() {
         _embedding_bag_per_sample_weights_backward_kernel<scalar_t, index_t>
           <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
-            grad.data_ptr<scalar_t>(), grad.stride(0), grad.stride(1),
-            weight.data_ptr<scalar_t>(), weight.stride(0), weight.stride(1),
-            indices.data_ptr<index_t>(),
-            offset2bag.data_ptr<index_t>(),
+            grad.const_data_ptr<scalar_t>(), grad.stride(0), grad.stride(1),
+            weight.const_data_ptr<scalar_t>(), weight.stride(0), weight.stride(1),
+            indices.const_data_ptr<index_t>(),
+            offset2bag.const_data_ptr<index_t>(),
             num_samples,
             embedding_features,
-            output.data_ptr<scalar_t>(),
+            output.mutable_data_ptr<scalar_t>(),
             padding_idx);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
@@ -548,5 +564,4 @@ Tensor _embedding_bag_per_sample_weights_backward_cuda(
   return output;
 }
 
-}
-}
+} // namespace at::native

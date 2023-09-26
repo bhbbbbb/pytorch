@@ -1,5 +1,6 @@
 #pragma once
 #include <torch/csrc/jit/mobile/module.h>
+#include <torch/csrc/jit/mobile/parse_operators.h>
 
 #include <istream>
 #include <memory>
@@ -22,7 +23,8 @@ constexpr const char* kArchiveNameVersion = "version";
 TORCH_API mobile::Module _load_for_mobile(
     std::istream& in,
     c10::optional<at::Device> device,
-    ExtraFilesMap& extra_files);
+    ExtraFilesMap& extra_file,
+    uint64_t module_load_options = kDefaultMobileLoadOptions);
 
 TORCH_API mobile::Module _load_for_mobile(
     const std::string& filename,
@@ -32,7 +34,8 @@ TORCH_API mobile::Module _load_for_mobile(
 TORCH_API mobile::Module _load_for_mobile(
     std::unique_ptr<ReadAdapterInterface> rai,
     c10::optional<c10::Device> device,
-    ExtraFilesMap& extra_files);
+    ExtraFilesMap& extra_files,
+    uint64_t module_load_options = kDefaultMobileLoadOptions);
 
 TORCH_API mobile::Module _load_for_mobile(
     const std::string& filename,
@@ -77,7 +80,7 @@ at::TypePtr resolveTypeNameMobile(
     std::shared_ptr<CompilationUnit> compilation_unit);
 c10::StrongTypePtr typeResolverMobile(
     const c10::QualifiedName& qn,
-    std::shared_ptr<CompilationUnit> compilation_unit);
+    const std::shared_ptr<CompilationUnit>& compilation_unit);
 c10::intrusive_ptr<c10::ivalue::Object> objLoaderMobile(
     const at::StrongTypePtr& type,
     const at::IValue& input,
@@ -104,5 +107,6 @@ TORCH_API std::set<std::string> _export_operator_list(
     torch::jit::mobile::Module& module);
 
 } // namespace mobile
+
 } // namespace jit
 } // namespace torch

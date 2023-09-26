@@ -151,7 +151,7 @@ Given a 1D `data` tensor and a boolean `mask` tensor of the same shape, returns 
 
 
 Github Links:
-- https://github.com/pytorch/pytorch/blob/master/caffe2/operators/boolean_mask_ops.cc
+- https://github.com/pytorch/pytorch/blob/main/caffe2/operators/boolean_mask_ops.cc
 
 <details>
 
@@ -217,7 +217,7 @@ If `lengths` tensor is $[a_1, a_2, ..., a_n]$, then length of `mask` tensor must
 
 
 Github Links:
-- https://github.com/pytorch/pytorch/blob/master/caffe2/operators/boolean_mask_ops.cc
+- https://github.com/pytorch/pytorch/blob/main/caffe2/operators/boolean_mask_ops.cc
 
 <details>
 
@@ -285,9 +285,6 @@ REGISTER_GRADIENT(BooleanMask, GetBooleanMaskGradient);
 NO_GRADIENT(BooleanMaskLengths);
 
 } // namespace
-
-// NOLINTNEXTLINE(clang-diagnostic-unused-const-variable)
-const float minf = -1.0f * std::numeric_limits<float>::infinity();
 
 // Template this on a functor object so we can generate different
 // implementations at compile time and have a better chance of inlining

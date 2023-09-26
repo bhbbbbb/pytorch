@@ -1,15 +1,44 @@
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/RangeFactories.h>
-#include <ATen/NativeFunctions.h>
 #include <ATen/AccumulateType.h>
-#include <ATen/Parallel.h>
 #include <ATen/Dispatch.h>
-#include <ATen/native/TensorIterator.h>
+#include <ATen/Parallel.h>
+#include <ATen/TensorIterator.h>
 #include <c10/util/irange.h>
 #include <cmath>
 #include <limits>
 
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/linspace.h>
+#include <ATen/ops/logspace.h>
+#include <ATen/ops/arange_native.h>
+#include <ATen/ops/linspace_native.h>
+#include <ATen/ops/logspace_native.h>
+#include <ATen/ops/range_native.h>
+#endif
+
 namespace at { namespace native {
 
+Tensor& linspace_out(const Tensor& start, const Tensor& end, int64_t steps, Tensor& result) {
+  TORCH_CHECK(start.dim() == 0 && end.dim() == 0, "linspace only supports 0-dimensional start and end tensors, "
+    "but got start with ", start.dim(), " dimension(s) and end with ", end.dim()," dimension(s).");
+  return at::linspace_out(result, start.item(), end.item(), steps);
+}
+
+Tensor& linspace_out(const Tensor& start, const Scalar& end, int64_t steps, Tensor& result) {
+  TORCH_CHECK(start.dim() == 0, "linspace only supports 0-dimensional start and end tensors, "
+    "but got start with ", start.dim(), " dimension(s).");
+  return at::linspace_out(result, start.item(), end, steps);
+}
+
+Tensor& linspace_out(const Scalar& start, const Tensor& end, int64_t steps, Tensor& result) {
+  TORCH_CHECK(end.dim() == 0, "linspace only supports 0-dimensional start and end tensors, "
+    "but got end with ", end.dim()," dimension(s).");
+  return at::linspace_out(result, start, end.item(), steps);
+}
 
 Tensor& linspace_out(const Scalar& start, const Scalar& end, int64_t steps, Tensor& result) {
   TORCH_CHECK(steps >= 0, "number of steps must be non-negative");
@@ -35,6 +64,24 @@ Tensor& linspace_out(const Scalar& start, const Scalar& end, int64_t steps, Tens
   }
 
   return result;
+}
+
+Tensor& logspace_out(const Tensor& start, const Tensor& end, int64_t steps, double base, Tensor& result) {
+  TORCH_CHECK(start.dim() == 0 && end.dim() == 0, "logspace only supports 0-dimensional start and end tensors, "
+    "but got start with ", start.dim(), " dimension(s) and end with ", end.dim()," dimension(s).");
+  return at::logspace_out(result, start.item(), end.item(), steps, base);
+}
+
+Tensor& logspace_out(const Tensor& start, const Scalar& end, int64_t steps, double base, Tensor& result) {
+  TORCH_CHECK(start.dim() == 0, "logspace only supports 0-dimensional start and end tensors, "
+    "but got start with ", start.dim(), " dimension(s).");
+  return at::logspace_out(result, start.item(), end, steps, base);
+}
+
+Tensor& logspace_out(const Scalar& start, const Tensor& end, int64_t steps, double base, Tensor& result) {
+  TORCH_CHECK(end.dim() == 0, "logspace only supports 0-dimensional start and end tensors, "
+    "but got end with ", end.dim()," dimension(s).");
+  return at::logspace_out(result, start, end.item(), steps, base);
 }
 
 Tensor& logspace_out(const Scalar& start, const Scalar& end, int64_t steps, double base, Tensor& result) {
@@ -115,7 +162,7 @@ Tensor& range_out(const Scalar& start, const Scalar& end, const Scalar& step, Te
              std::isfinite(static_cast<double>(xend)),
              "unsupported range: ", xstart, " -> ", xend);
     TORCH_CHECK(((xstep > 0) && (xend >= xstart)) || ((xstep < 0) && (xend <= xstart)),
-             "upper bound and larger bound inconsistent with step sign");
+             "upper bound and lower bound inconsistent with step sign");
     int64_t size = static_cast<int64_t>(((xend - xstart) / xstep) + 1);
     if (result.numel() != size) {
       result.resize_({size});
@@ -142,12 +189,23 @@ Tensor& range_out(const Scalar& start, const Scalar& end, const Scalar& step, Te
   return result;
 }
 
+Tensor& range_out_no_step(const Scalar& start, const Scalar& end, Tensor& result) {
+  return range_out(start, end, /*step = */ 1, result);
+}
+
 Tensor& arange_out(const Scalar& start, const Scalar& end, const Scalar& step, Tensor& result) {
-  AT_DISPATCH_ALL_TYPES_AND(kBFloat16, result.scalar_type(), "arange_cpu", [&]() {
+  AT_DISPATCH_ALL_TYPES_AND2(kHalf, kBFloat16, result.scalar_type(), "arange_cpu", [&]() {
     using accscalar_t = at::acc_type<scalar_t, false>;
     auto xstart = start.to<accscalar_t>();
     auto xend = end.to<accscalar_t>();
     auto xstep = step.to<accscalar_t>();
+
+    TORCH_CHECK(xstep > 0 || xstep < 0, "step must be nonzero");
+    TORCH_CHECK(std::isfinite(static_cast<double>(xstart)) &&
+             std::isfinite(static_cast<double>(xend)),
+             "unsupported range: ", xstart, " -> ", xend);
+    TORCH_CHECK(((xstep > 0) && (xend >= xstart)) || ((xstep < 0) && (xend <= xstart)),
+             "upper bound and larger bound inconsistent with step sign");
 
     // we use double precision for (start - end) / step
     // to compute size_d for consistency across devices.
@@ -157,21 +215,13 @@ Tensor& arange_out(const Scalar& start, const Scalar& end, const Scalar& step, T
     // we dont want.
     // the corner-case we do want to take into account is int64_t, which has higher precision than double
     double size_d;
-    // NOLINTNEXTLINE(bugprone-branch-clone)
-    if (std::is_same<scalar_t, int64_t>::value) {
-      size_d = std::ceil(static_cast<double>(end.to<accscalar_t>() - start.to<accscalar_t>())
-                         / step.to<accscalar_t>());
+    if constexpr (std::is_same_v<scalar_t, int64_t>) {
+      int64_t sgn = (xstep > 0) - (xstep < 0);
+      size_d = std::ceil((xend - xstart + xstep - sgn) / xstep);
     } else {
       size_d = std::ceil(static_cast<double>(end.to<double>() - start.to<double>())
                          / step.to<double>());
     }
-
-    TORCH_CHECK(xstep > 0 || xstep < 0, "step must be nonzero");
-    TORCH_CHECK(std::isfinite(static_cast<double>(xstart)) &&
-             std::isfinite(static_cast<double>(xend)),
-             "unsupported range: ", xstart, " -> ", xend);
-    TORCH_CHECK(((xstep > 0) && (xend >= xstart)) || ((xstep < 0) && (xend <= xstart)),
-             "upper bound and larger bound inconsistent with step sign");
 
     TORCH_CHECK(size_d >= 0 && size_d <= static_cast<double>(std::numeric_limits<int64_t>::max()),
              "invalid size, possible overflow?");

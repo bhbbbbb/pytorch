@@ -7,11 +7,10 @@ from textwrap import dedent
 import torch
 from torch import nn
 from torch.testing import FileCheck
-from torch.testing._internal.common_methods_invocations import (
-    sample_inputs_cat_concat,
-)
+from torch.testing._internal.common_methods_invocations import sample_inputs_cat_concat
 from torch.testing._internal.common_utils import make_tensor
 from torch.testing._internal.jit_utils import JitTestCase, execWrapper
+from typing import List, Any
 
 if __name__ == '__main__':
     raise RuntimeError("This test file is not meant to be run directly, use:\n\n"
@@ -21,6 +20,7 @@ if __name__ == '__main__':
 # XXX: still in prototype
 class TestSymbolicShapeAnalysis(JitTestCase):
     def setUp(self):
+        super(JitTestCase, self).setUp()
         self.prev_symbolic_shapes_test_enabled = torch._C._jit_symbolic_shapes_test_mode_enabled()
         torch._C._jit_set_symbolic_shapes_test_mode(True)
 
@@ -163,7 +163,6 @@ class TestSymbolicShapeAnalysis(JitTestCase):
             inputs[1].setType(inputs[1].type().with_sizes(size_2))
             torch._C._jit_pass_propagate_shapes_on_graph(t.graph)
             self.assertEqual(next(t.graph.outputs()).type().symbolic_sizes(), [4, 4, 8])
-            break
 
     def test_binary_shape_fns_inplace(self):
         def div_inplace_tensor(x: torch.Tensor, y: torch.Tensor):
@@ -227,6 +226,33 @@ class TestSymbolicShapeAnalysis(JitTestCase):
             torch._C._jit_pass_constant_propagation(fn.graph)
             self.checkShapeAnalysis(out_size, fn.graph, assert_propagation=True)
 
+    def test_conv_deconv(self):
+        for inp_shape, weight_shape, bias, stride, padding, output_padding, dilation, groups, mod in [
+                ([32, 6, 10], [16, 3, 3], None, 2, 2, 1, 1, 2, torch.nn.functional.conv1d),
+                ([32, 16, 10], [16, 3, 3], None, 2, 2, 1, 1, 2, torch.nn.functional.conv_transpose1d),
+                ([1, 32, 5, 10], [30, 16, 3, 3], None, [2, 2], [0, 0], 0, 1, 2, torch.nn.functional.conv2d),
+                ([1, 30, 5, 10], [30, 16, 3, 3], None, [2, 2], [0, 0], 0, 1, 2, torch.nn.functional.conv_transpose2d),
+                ([3, 14, 10, 66, 55], [2, 7, 7, 4, 4], None, 1, 1, 2, 1, 2, torch.nn.functional.conv3d),
+                ([3, 2, 10, 66, 55], [2, 7, 7, 4, 4], None, 1, 1, 0, 1, 2, torch.nn.functional.conv_transpose3d)]:
+            inp = torch.rand(inp_shape)
+            weight = torch.rand(weight_shape)
+            if mod in [torch.nn.functional.conv1d, torch.nn.functional.conv2d, torch.nn.functional.conv3d]:
+                res = mod(inp, weight, bias, stride, padding, dilation, groups).size()
+            else:
+                res = mod(inp, weight, bias, stride, padding, output_padding, dilation, groups).size()
+
+            def foo(inp, weight):
+                if mod in [torch.nn.functional.conv1d, torch.nn.functional.conv2d, torch.nn.functional.conv3d]:
+                    return mod(inp, weight, bias, stride, padding, dilation, groups)
+                else:
+                    return mod(inp, weight, bias, stride, padding, output_padding, dilation, groups)
+
+            fn = torch.jit.trace(foo, (inp, weight))
+            torch._C._jit_erase_non_input_shape_information(fn.graph)
+            torch._C._jit_pass_peephole(fn.graph)
+            torch._C._jit_pass_constant_propagation(fn.graph)
+            self.checkShapeAnalysis(res, fn.graph, assert_propagation=True)
+
     def test_arange_shape(self):
         # no opinfo for tensor constructors
         inps = [
@@ -276,7 +302,7 @@ class TestSymbolicShapeAnalysis(JitTestCase):
             nn_inps = (
                 (make_arg((40,), 0, 9), torch.nn.Embedding(20, embedding_dim=64, max_norm=1.0)),
                 (make_arg((2, 4), 0, 9), torch.nn.Embedding(10, 20, sparse=True)),
-                (make_arg(()), torch.nn.Embedding(0, 0, sparse=True)),
+                (make_arg((0,)), torch.nn.Embedding(0, 0, sparse=True)),
                 (make_arg((2, 4), 0, 9), torch.nn.Embedding(10, 0, sparse=True)),
                 (make_arg((4,), 0, 21), torch.nn.Embedding(22, 5, max_norm=1.0)),
                 (make_arg((2,), 0, 1), torch.nn.Embedding.from_pretrained(torch.arange(6.).view(2, 3), max_norm=2.,
@@ -310,7 +336,7 @@ class TestSymbolicShapeAnalysis(JitTestCase):
             __constants__ = ['dim']
 
             def __init__(self, dim=0):
-                super(CatMod, self).__init__()
+                super().__init__()
                 self.dim = dim
 
             def forward(self, x, y):
@@ -320,12 +346,54 @@ class TestSymbolicShapeAnalysis(JitTestCase):
             mod = torch.jit.script(CatMod(**inp.kwargs).eval())
 
             args = inp.input
-            self.assertTrue(len(args) == 2)
+
+            # This test is hard-coded only to work with two sample inputs
+            # but the OpInfo may have more/less
+            if len(args) != 2:
+                continue
+
             out_size = mod(*args).size()
             inps = list(mod.graph.inputs())
             inps[1].setType(inps[1].type().with_sizes(args[0].size()))
             inps[2].setType(inps[2].type().with_sizes(args[1].size()))
             self.checkShapeAnalysis(out_size, mod.graph, assert_propagation=True)
+
+    def assert_shape_equal_scripted(self, script_fn, given_ins):
+        expected_res = script_fn(*given_ins)
+        g = script_fn.graph
+        graph_ins = list(g.inputs())
+        self.assertEqual(len(given_ins), len(graph_ins))
+        for inp, graph_in in zip(given_ins, graph_ins):
+            graph_in.setType(graph_in.type().with_sizes(inp.size()))
+
+        out_sizes = [out.size() for out in expected_res]
+        self.checkShapeAnalysis(out_sizes, g, assert_propagation=True)
+
+    def test_convolution_backward(self):
+        # No opinfos for ops that are not part of the Python API
+        # Also, as the return shapes are the input, weight, and bias shape, there is no point
+        # in a really complicated test
+
+        input = torch.randn((16, 16, 8, 8), dtype=torch.float32, device="cpu", requires_grad=True)
+        weight = torch.randn((8, 4, 3, 3), dtype=torch.float32, device="cpu", requires_grad=True)
+        out_grad = torch.randn((16, 8, 8, 8), dtype=torch.float32, device="cpu")
+
+
+        @torch.jit.script
+        def conv_bwd(input, weight, grad):
+            bias_sizes = [8, ]
+            args = ([1, 1], [1, 1], [1, 1], False, [0, 0], 4, [True, True, True])
+            return torch.ops.aten.convolution_backward(grad, input, weight, bias_sizes, *args)
+
+        self.assert_shape_equal_scripted(conv_bwd, (input, weight, out_grad))
+
+        @torch.jit.script
+        def conv_bwd_2(input, weight, grad):
+            bias_sizes = None
+            args = ([1, 1], [1, 1], [1, 1], False, [0, 0], 4, [True, True, True])
+            return torch.ops.aten.convolution_backward(grad, input, weight, bias_sizes, *args)
+        self.assert_shape_equal_scripted(conv_bwd_2, (input, weight, out_grad))
+
 
     def test_returning_input_symbolic_shapes(self):
         mm = torch.jit.freeze(torch.jit.script(nn.Conv2d(16, 33, 3, stride=2).eval()))
@@ -401,7 +469,7 @@ class TestSymbolicShapeAnalysis(JitTestCase):
     def test_refinement_through_graph_stitching(self):
         class TwoConvs(torch.nn.Module):
             def __init__(self):
-                super(TwoConvs, self).__init__()
+                super().__init__()
                 self.conv1 = torch.nn.Conv2d(3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
                 self.conv2 = torch.nn.Conv2d(3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
 
@@ -498,3 +566,58 @@ class TestSymbolicShapeAnalysis(JitTestCase):
         m2_shape = [20, 10]
         res = torch.jit._shapes.matmul(m1_shape, m2_shape)
         self.assertEqual(res, [10, 10])
+
+    def test_register_function_error_checking(self):
+        # this will error before registering on global map, so
+        # no issue in overwriting schema mappings
+        @torch.jit.script
+        def foo(x, y):
+            return x + y
+
+        node = foo.graph.findNode("aten::add")
+
+        @torch.jit.script
+        def wrong_input_types(x, y):
+            x: List[int] = []
+            return x
+        with self.assertRaisesRegex(RuntimeError, "Expected supertype of int"):
+            torch._C._jit_register_shape_compute_graph_for_node(node, wrong_input_types.graph)
+
+        @torch.jit.script
+        def wrong_output_types(x: List[int], y: List[int]):
+            x: List[Tensor] = []
+            return x
+
+        with self.assertRaisesRegex(RuntimeError, "but got graph_type"):
+            torch._C._jit_register_shape_compute_graph_for_node(node, wrong_output_types.graph)
+
+        @torch.jit.script
+        def too_many_inputs(x: List[int], y: List[int], z: Any, z2: Any):
+            x: List[int] = []
+            return x
+
+        with self.assertRaises(RuntimeError) as error:
+            torch._C._jit_register_shape_compute_graph_for_node(node, too_many_inputs.graph)
+
+        self.assertTrue("fewer arguments than schema" in str(error.exception))
+
+    def test_cross_entropy_loss(self):
+        @torch.jit.script
+        def foo(x, y):
+            return torch.ops.aten.cross_entropy_loss(x, y, reduction=0)
+
+        inputs = list(foo.graph.inputs())
+        inputs[0].setType(inputs[0].type().with_sizes([8, 2]))
+        inputs[1].setType(inputs[1].type().with_sizes([8,]))
+        torch._C._jit_pass_propagate_shapes_on_graph(foo.graph)
+        self.assertEqual(next(foo.graph.outputs()).type().sizes(), [8,])
+
+    def test_squeeze_dims(self):
+        @torch.jit.script
+        def foo(x):
+            return torch.ops.aten.squeeze(x, dim=0)
+
+        input = next(foo.graph.inputs())
+        input.setType(input.type().with_sizes([1, 5, 8]))
+        torch._C._jit_pass_propagate_shapes_on_graph(foo.graph)
+        self.assertEqual(next(foo.graph.outputs()).type().symbolic_sizes(), [5, 8])

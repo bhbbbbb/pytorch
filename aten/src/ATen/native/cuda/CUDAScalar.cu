@@ -10,19 +10,18 @@
 
 #include <ATen/cuda/CUDAContext.h>
 
-namespace at {
-namespace native {
+namespace at::native {
 
 Scalar _local_scalar_dense_cuda(const Tensor& self) {
   Scalar r;
-  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND3(
-    at::ScalarType::Half, at::ScalarType::Bool, at::ScalarType::BFloat16, self.scalar_type(), "_local_scalar_dense_cuda", [&] {
+  AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND4(
+    kComplexHalf, kHalf, kBool, kBFloat16, self.scalar_type(), "_local_scalar_dense_cuda", [&] {
         scalar_t value;
         cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-        at::cuda::memcpy_and_sync(&value, self.data_ptr<scalar_t>(), sizeof(scalar_t), cudaMemcpyDeviceToHost, stream);
+        at::cuda::memcpy_and_sync(&value, self.const_data_ptr<scalar_t>(), sizeof(scalar_t), cudaMemcpyDeviceToHost, stream);
         r = Scalar(value);
       });
   return r;
 }
 
-}} // at::native
+} // at::native

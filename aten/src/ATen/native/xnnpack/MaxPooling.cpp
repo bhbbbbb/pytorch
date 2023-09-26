@@ -1,13 +1,12 @@
 #ifdef USE_XNNPACK
 
 #include <ATen/native/Pool.h>
-#include <ATen/native/xnnpack/Common.h>
 #include <ATen/native/utils/Factory.h>
+#include <ATen/native/xnnpack/Common.h>
+#include <ATen/native/xnnpack/Engine.h>
 #include <ATen/native/xnnpack/Pooling.h>
 
-namespace at {
-namespace native {
-namespace xnnpack {
+namespace at::native::xnnpack {
 
 // Supports NHWC and NCHW FP32 max pooling with any
 //  - kernel size
@@ -186,7 +185,7 @@ Tensor max_pool2d(
       },
       input_padded_contig_nhwc.options().dtype(),
       MemoryFormat::ChannelsLast,
-      input_padded_contig_nhwc.names());
+      input_padded_contig_nhwc.opt_names());
 
   xnn_operator_t max_pool_op{};
 
@@ -239,8 +238,6 @@ Tensor max_pool2d(
   return output_padded_contig_nhwc.contiguous(input.suggest_memory_format());
 }
 
-} // namespace xnnpack
-} // namespace native
-} // namespace at
+} // namespace at::native::xnnpack
 
 #endif /* USE_XNNPACK */

@@ -1,16 +1,27 @@
 #pragma once
 
+#include <c10/macros/Macros.h>
+
+C10_DIAGNOSTIC_PUSH_AND_IGNORED_IF_DEFINED("-Wsuggest-override")
+C10_DIAGNOSTIC_PUSH_AND_IGNORED_IF_DEFINED("-Wnewline-eof")
+#include <onnx/shape_inference/implementation.h>
+C10_DIAGNOSTIC_POP()
+C10_DIAGNOSTIC_POP()
+
 #include <torch/csrc/jit/ir/ir.h>
+#include <torch/csrc/jit/serialization/export.h>
 #include <mutex>
 #include <unordered_map>
 
 namespace torch {
 namespace jit {
 
+using ShapeDataMap =
+    std::unordered_map<std::string, ::ONNX_NAMESPACE::TensorShapeProto>;
+
 class ConstantValueMap {
  public:
   static ConstantValueMap& getInstance();
-
   static void SetRank(const std::string& tensorName, size_t rankValue);
   static bool HasRank(const std::string& tensorName);
   static c10::optional<size_t> GetRank(const std::string& tensorName);
@@ -25,6 +36,7 @@ class ConstantValueMap {
   static void SetValue(const std::string& tensorName, const at::Tensor& value);
   static bool HasValue(const std::string& tensorName);
   static c10::optional<at::Tensor> GetValue(const std::string& tensorName);
+  static void EraseValue(const std::string& tensorName);
 
   static std::vector<int64_t> GetCompleteShapeInto1DInt64Vector(
       const c10::SymbolicShape& shape);
@@ -51,6 +63,10 @@ class ConstantValueMap {
   static bool HasShapeValue(const std::string& tensorName);
   static c10::optional<c10::SymbolicShape> GetShapeValue(
       const std::string& tensorName);
+
+  static ShapeDataMap& GetInferredShapeData();
+
+  static SymbolDimMap& GetSymbolDimMap();
 
   static void UpdateValueName(
       const std::string& old_name,
@@ -81,6 +97,10 @@ class ConstantValueMap {
   // from a node. shapeValueMap stores the value of the tensor from a node when
   // this tensor represents a shape.
   std::unordered_map<std::string, c10::SymbolicShape> shapeValueMap;
+  // Stores earlier data propagation results so that they are accessible
+  // during future node-level shape inference.
+  ShapeDataMap inferredShapeData;
+  SymbolDimMap symbolDimMap;
 };
 
 } // namespace jit

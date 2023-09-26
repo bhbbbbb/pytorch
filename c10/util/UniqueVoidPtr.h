@@ -10,7 +10,7 @@ using DeleterFnPtr = void (*)(void*);
 namespace detail {
 
 // Does not delete anything
-TORCH_API void deleteNothing(void*);
+C10_API void deleteNothing(void*);
 
 // A detail::UniqueVoidPtr is an owning smart pointer like unique_ptr, but
 // with three major differences:
@@ -75,6 +75,11 @@ class UniqueVoidPtr {
     return true;
   }
 
+  /// Casts the context to the requested type, contingent on the
+  /// deleter matching.
+  ///
+  /// Returns null without attempting a cast if the deleter does not
+  /// match.
   template <typename T>
   T* cast_context(DeleterFnPtr expected_deleter) const {
     if (get_deleter() != expected_deleter)

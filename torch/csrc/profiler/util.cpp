@@ -1,9 +1,10 @@
-#include <torch/csrc/profiler/util.h>
+#include <torch/csrc/autograd/function.h>
 #include <torch/csrc/profiler/kineto_shim.h>
+#include <torch/csrc/profiler/util.h>
 
 #include <c10/util/ArrayRef.h>
-#include <fmt/format.h>
 #include <c10/util/irange.h>
+#include <fmt/format.h>
 
 #ifdef USE_KINETO
 #include <libkineto.h>
@@ -14,7 +15,7 @@ namespace profiler {
 namespace impl {
 
 ApproximateClockToUnixTimeConverter::ApproximateClockToUnixTimeConverter()
-  : start_times_(measurePairs()) {}
+    : start_times_(measurePairs()) {}
 
 ApproximateClockToUnixTimeConverter::UnixAndApproximateTimePair
 ApproximateClockToUnixTimeConverter::measurePair() {
@@ -32,9 +33,9 @@ ApproximateClockToUnixTimeConverter::measurePair() {
 }
 
 ApproximateClockToUnixTimeConverter::time_pairs
-    ApproximateClockToUnixTimeConverter::measurePairs() {
+ApproximateClockToUnixTimeConverter::measurePairs() {
   static constexpr auto n_warmup = 5;
-  for (const auto _ : c10::irange(n_warmup)) {
+  for (C10_UNUSED const auto _ : c10::irange(n_warmup)) {
     getApproximateTime();
     steady_clock_t::now();
   }
@@ -46,8 +47,8 @@ ApproximateClockToUnixTimeConverter::time_pairs
   return out;
 }
 
-std::function<time_t(approx_time_t)>
-ApproximateClockToUnixTimeConverter::makeConverter() {
+std::function<time_t(approx_time_t)> ApproximateClockToUnixTimeConverter::
+    makeConverter() {
   auto end_times = measurePairs();
 
   // Compute the real time that passes for each tick of the approximate clock.
@@ -71,8 +72,9 @@ ApproximateClockToUnixTimeConverter::makeConverter() {
   auto t0_approx = start_times_[0].approx_t_;
   std::array<double, replicates> t0_correction{};
   for (const auto i : c10::irange(replicates)) {
-    auto dt = start_times_[i].t_  - t0;
-    auto dt_approx = (double)(start_times_[i].approx_t_ - t0_approx) * scale_factor;
+    auto dt = start_times_[i].t_ - t0;
+    auto dt_approx =
+        (double)(start_times_[i].approx_t_ - t0_approx) * scale_factor;
     t0_correction[i] = dt - (time_t)dt_approx;
   }
   t0 += t0_correction[t0_correction.size() / 2 + 1];
@@ -83,14 +85,68 @@ ApproximateClockToUnixTimeConverter::makeConverter() {
   };
 }
 
+namespace {
+c10::optional<bool> soft_assert_raises_;
+} // namespace
+
+void setSoftAssertRaises(c10::optional<bool> value) {
+  soft_assert_raises_ = value;
+}
+
+bool softAssertRaises() {
+  return soft_assert_raises_.value_or(false);
+}
+
+void logSoftAssert(
+    const char* func,
+    const char* file,
+    uint32_t line,
+    const char* cond,
+    const char* args) {
+#ifdef USE_KINETO
+  std::string error;
+  error = fmt::format(
+      "{} SOFT ASSERT FAILED at {}:{}, func: {}, args: {}",
+      cond,
+      file,
+      line,
+      func,
+      args);
+  // TODO: Implement profile_id and group_profile_id as 3rd/4th arguments.
+  kineto::logInvariantViolation(cond, error, "", "");
+#endif
+}
+
+void logSoftAssert(
+    const char* func,
+    const char* file,
+    uint32_t line,
+    const char* cond,
+    const std::string& args) {
+#ifdef USE_KINETO
+  std::string error;
+  error = fmt::format(
+      "{} SOFT ASSERT FAILED at {}:{}, func: {}, args: {}",
+      cond,
+      file,
+      line,
+      func,
+      args);
+  // TODO: Implement profile_id and group_profile_id as 3rd/4th arguments.
+  kineto::logInvariantViolation(cond, error, "", "");
+#endif
+}
+
 // ----------------------------------------------------------------------------
 // -- NVTX --------------------------------------------------------------------
 // ----------------------------------------------------------------------------
 std::string getNvtxStr(
     const char* name,
     int64_t sequence_nr,
-    const std::vector<std::vector<int64_t>>& shapes) {
-  if (sequence_nr >= -1 || shapes.size() > 0) {
+    const std::vector<std::vector<int64_t>>& shapes,
+    at::RecordFunctionHandle op_id,
+    const std::list<std::pair<at::RecordFunctionHandle, int>>& input_op_ids) {
+  if (sequence_nr >= -1 || !shapes.empty()) {
     std::string str;
     if (sequence_nr >= 0) {
       str = fmt::format("{}, seq = {}", name, sequence_nr);
@@ -102,31 +158,18 @@ std::string getNvtxStr(
       str = name;
 #endif
     }
-    if (shapes.size() > 0) {
-      std::stringstream s;
-      s << str;
-      s << ", sizes = [";
-      for (const auto idx : c10::irange(shapes.size())) {
-        if (shapes[idx].size() > 0) {
-          s << "[";
-          for (const auto dim : c10::irange(shapes[idx].size())) {
-            s << shapes[idx][dim];
-            if (dim < shapes[idx].size() - 1) {
-              s << ", ";
-            }
-          }
-          s << "]";
-        } else {
-          s << "[]";
-        }
-        if (idx < shapes.size() - 1) {
-          s << ", ";
-        }
-      }
-      s << "]";
-      return s.str();
+    if (op_id > 0) {
+      str = fmt::format("{}, op_id = {}", str, op_id);
     }
-
+    if (!shapes.empty()) {
+      str = fmt::format("{}, sizes = {}", str, shapesToStr(shapes));
+    }
+    // Include the op ids of the input edges so
+    // you can build the network graph
+    if (!input_op_ids.empty()) {
+      str = fmt::format(
+          "{}, input_op_ids = {}", str, inputOpIdsToStr(input_op_ids));
+    }
     return str;
   } else {
     return name;
@@ -185,17 +228,44 @@ std::string stacksToStr(
   return "\"" + rc + "\"";
 }
 
-std::vector<std::vector<int64_t>> inputSizes(const at::RecordFunction& fn) {
+static std::vector<std::vector<int64_t>> flattenList(
+    const c10::List<c10::IValue>& list) {
+  std::vector<std::vector<int64_t>> tensor_dims;
+  for (const c10::IValue& input : list) {
+    if (input.isTensor()) {
+      const at::Tensor& tensor = input.toTensor();
+      if (tensor.defined()) {
+        tensor_dims.push_back(input.toTensor().sizes().vec());
+      }
+    }
+  }
+  return tensor_dims;
+}
+
+std::vector<std::vector<int64_t>> inputSizes(
+    const at::RecordFunction& fn,
+    bool flatten_list_enabled) {
   std::vector<std::vector<int64_t>> sizes;
   sizes.reserve(fn.inputs().size());
   for (const c10::IValue& input : fn.inputs()) {
-    if (!input.isTensor()) {
-      sizes.emplace_back();
-      continue;
-    }
-    const at::Tensor& tensor = input.toTensor();
-    if (tensor.defined()) {
-      sizes.push_back(input.toTensor().sizes().vec());
+    if (input.isTensor()) {
+      const at::Tensor& tensor = input.toTensor();
+      if (tensor.defined()) {
+        sizes.push_back(input.toTensor().sizes().vec());
+      } else {
+        sizes.emplace_back();
+      }
+    } else if (input.isList()) {
+      std::vector<std::vector<int64_t>> tmp_sizes;
+      if (flatten_list_enabled) {
+        tmp_sizes = flattenList(input.toList());
+      }
+      // Extend the current sizes array by the array returned from input sizes
+      if (!tmp_sizes.empty()) {
+        sizes.insert(sizes.end(), tmp_sizes.begin(), tmp_sizes.end());
+      } else {
+        sizes.emplace_back();
+      }
     } else {
       sizes.emplace_back();
     }
@@ -204,26 +274,79 @@ std::vector<std::vector<int64_t>> inputSizes(const at::RecordFunction& fn) {
 }
 
 std::string shapesToStr(const std::vector<std::vector<int64_t>>& shapes) {
-  std::ostringstream oss;
-  oss << "[";
+  std::string str("[");
   for (const auto t_idx : c10::irange(shapes.size())) {
     if (t_idx > 0) {
-      oss << ", ";
+      str = fmt::format("{}, ", str);
     }
-    oss << "[";
-    for (const auto s_idx : c10::irange(shapes[t_idx].size())) {
-      if (s_idx > 0) {
-        oss << ", ";
-      }
-      oss << shapes[t_idx][s_idx];
-    }
-    oss << "]";
+    str = fmt::format("{}{}", str, shapeToStr(shapes[t_idx]));
   }
-  oss << "]";
-  return oss.str();
+  str = fmt::format("{}]", str);
+  return str;
 }
 
-std::string dtypesToStr(const std::vector<std::string>& types) {
+std::string variantShapesToStr(const std::vector<shape>& shapes) {
+  std::string str("[");
+  for (const auto t_idx : c10::irange(shapes.size())) {
+    if (t_idx > 0) {
+      str = fmt::format("{}, ", str);
+    }
+    if (std::holds_alternative<std::vector<int64_t>>(shapes[t_idx])) {
+      const auto& shape = std::get<std::vector<int64_t>>(shapes[t_idx]);
+      str = fmt::format("{}{}", str, shapeToStr(shape));
+    } else if (std::holds_alternative<std::vector<std::vector<int64_t>>>(
+                   shapes[t_idx])) {
+      const auto& tensor_shape =
+          std::get<std::vector<std::vector<int64_t>>>(shapes[t_idx]);
+      if (tensor_shape.size() > TENSOR_LIST_DISPLAY_LENGTH_LIMIT) {
+        // skip if the tensor list is too long
+        str = fmt::format("{}[]", str);
+        continue;
+      }
+      str = fmt::format("{}[", str);
+      for (const auto s_idx : c10::irange(tensor_shape.size())) {
+        if (s_idx > 0) {
+          str = fmt::format("{}, ", str);
+        }
+        str = fmt::format("{}{}", str, shapeToStr(tensor_shape[s_idx]));
+      }
+      str = fmt::format("{}]", str);
+    }
+  }
+  str = fmt::format("{}]", str);
+  return str;
+}
+
+std::string shapeToStr(const std::vector<int64_t>& shape) {
+  std::string str("[");
+  for (const auto s_idx : c10::irange(shape.size())) {
+    if (s_idx > 0) {
+      str = fmt::format("{}, ", str);
+    }
+    str = fmt::format("{}{}", str, shape[s_idx]);
+  }
+  str = fmt::format("{}]", str);
+  return str;
+}
+
+std::string inputOpIdsToStr(
+    const std::list<std::pair<at::RecordFunctionHandle, int>>& input_op_ids) {
+  std::string str("[");
+  int idx = 0;
+
+  for (const auto& op_id_info_pair : input_op_ids) {
+    if (idx++ > 0) {
+      str = fmt::format("{}, ", str);
+    }
+    // (OpId,OutputNr)
+    str = fmt::format(
+        "{}({},{})", str, op_id_info_pair.first, op_id_info_pair.second);
+  }
+  str = fmt::format("{}]", str);
+  return str;
+}
+
+std::string strListToStr(const std::vector<std::string>& types) {
   if (types.empty()) {
     return "[]";
   } else {
@@ -232,11 +355,26 @@ std::string dtypesToStr(const std::vector<std::string>& types) {
         types.begin(),
         types.end(),
         std::ostream_iterator<std::string>(oss, ", "),
-        [](std::string s) -> std::string { return "\"" + s + "\""; });
+        [](const std::string& s) -> std::string { return "\"" + s + "\""; });
     auto rc = oss.str();
     rc.erase(rc.length() - 2); // remove last ", "
     return "[" + rc + "]";
   }
+}
+
+std::string ivalueListToStr(const std::vector<c10::IValue>& list) {
+  std::vector<std::string> concrete_str_inputs;
+  std::stringstream ss;
+  for (const auto& val : list) {
+    if (val.isNone()) {
+      concrete_str_inputs.emplace_back("");
+    } else {
+      ss.str("");
+      ss << val;
+      concrete_str_inputs.emplace_back(ss.str());
+    }
+  }
+  return strListToStr(concrete_str_inputs);
 }
 
 std::vector<std::string> inputTypes(const at::RecordFunction& fn) {
@@ -290,11 +428,11 @@ static constexpr auto kMat2Size = "mat2_size";
 static bool validateInput(
     const std::string& op_name,
     size_t min_size,
-    const std::vector<c10::IValue>& inputs,
+    c10::ArrayRef<const c10::IValue> inputs,
     const c10::ArrayRef<int>& should_be_tensor) {
   std::stringstream ss;
   if (inputs.size() < min_size) {
-    ss << "Failed to save extra arguments for flops compuation of op "
+    ss << "Failed to save extra arguments for flops computation of op "
        << op_name << ", min size: " << min_size
        << ", actual size: " << inputs.size();
     TORCH_WARN(ss.str());
@@ -302,7 +440,7 @@ static bool validateInput(
   }
   for (auto index : should_be_tensor) {
     if (!inputs[index].isTensor()) {
-      ss << "Failed to save extra arguments for flops compuation of op "
+      ss << "Failed to save extra arguments for flops computation of op "
          << op_name << ", input[" << index << "] must be a tensor.";
       TORCH_WARN(ss.str());
       return false;
@@ -315,7 +453,7 @@ std::unordered_map<std::string, c10::IValue> saveExtraArgs(
     const at::RecordFunction& fn) {
   // for specific types of fn, return the saved extra args for computing flops
   std::unordered_map<std::string, c10::IValue> map;
-  std::vector<c10::IValue> inputs = fn.inputs();
+  auto inputs = fn.inputs();
   std::string fname(fn.name());
 
   if (inputs.empty()) {
@@ -469,7 +607,8 @@ uint64_t computeFlops(
           "Failed to compute flops for op aten::conv2d because stride must be size 2 and cannot be 0.");
       return 0;
     }
-    // format of the input is defined in torch.nn.quantized.functional.conv2d()
+    // format of the input is defined in
+    // torch.ao.nn.quantized.functional.conv2d()
     uint64_t minibatch = 0, in_channels = 0, input_h = 0, input_w = 0;
     uint64_t out_channels = 0, kernel_h = 0, kernel_w = 0;
     const uint64_t conv2d_multiply_factor = 2;
@@ -509,7 +648,7 @@ uint64_t computeFlops(
 
     const auto mat1_size = mat1_sizes_ref.toDimVector();
     const auto mat2_size = mat2_sizes_ref.toDimVector();
-    if (mat1_size.size() == 0) {
+    if (mat1_size.empty()) {
       return 0;
     }
 
@@ -550,7 +689,7 @@ uint64_t computeFlops(
 
     const auto mat1_size = mat1_sizes_ref.toDimVector();
     const auto mat2_size = mat2_sizes_ref.toDimVector();
-    if (mat1_size.size() == 0) {
+    if (mat1_size.empty()) {
       return 0;
     }
 

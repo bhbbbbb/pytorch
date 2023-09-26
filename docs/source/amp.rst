@@ -6,7 +6,6 @@ Automatic Mixed Precision package - torch.amp
 
 .. Both modules below are missing doc entry. Adding them here for now.
 .. This does not add anything to the rendered page
-.. py:module:: torch.cpu
 .. py:module:: torch.cpu.amp
 .. py:module:: torch.cuda.amp
 
@@ -23,11 +22,15 @@ Ordinarily, "automatic mixed precision training" with datatype of ``torch.float1
 :class:`torch.cuda.amp.GradScaler` together, as shown in the :ref:`CUDA Automatic Mixed Precision examples<amp-examples>`
 and `CUDA Automatic Mixed Precision recipe <https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html>`_.
 However, :class:`torch.autocast` and :class:`torch.cuda.amp.GradScaler` are modular, and may be used separately if desired.
+As shown in the CPU example section of :class:`torch.autocast`, "automatic mixed precision training/inference" on CPU with
+datatype of ``torch.bfloat16`` only uses :class:`torch.autocast`.
 
-For CUDA and CPU, APIs are also provided seperately:
+For CUDA and CPU, APIs are also provided separately:
 
 * ``torch.autocast("cuda", args...)`` is equivalent to ``torch.cuda.amp.autocast(args...)``.
 * ``torch.autocast("cpu", args...)`` is equivalent to ``torch.cpu.amp.autocast(args...)``. For CPU, only lower precision floating point datatype of ``torch.bfloat16`` is supported for now.
+
+:class:`torch.autocast` and :class:`torch.cpu.amp.autocast` are new in version `1.10`.
 
 .. contents:: :local:
 
@@ -71,6 +74,15 @@ so they don't flush to zero.
 
 Each parameter's gradient (``.grad`` attribute) should be unscaled before the optimizer
 updates the parameters, so the scale factor does not interfere with the learning rate.
+
+.. note::
+
+  AMP/fp16 may not work for every model! For example, most bf16-pretrained models cannot operate in
+  the fp16 numerical range of max 65504 and will cause gradients to overflow instead of underflow. In
+  this case, the scale factor may decrease under 1 as an attempt to bring gradients to a number
+  representable in the fp16 dynamic range. While one may expect the scale to always be above 1, our
+  GradScaler does NOT make this guarantee to maintain performance. If you encounter NaNs in your loss
+  or gradients when running with AMP/fp16, verify your model is compatible.
 
 .. currentmodule:: torch.cuda.amp
 
@@ -264,6 +276,7 @@ CPU Ops that can autocast to ``bfloat16``
 ``addmm``,
 ``addbmm``,
 ``linear``,
+``matmul``,
 ``_convolution``
 
 CPU Ops that can autocast to ``float32``
@@ -272,61 +285,29 @@ CPU Ops that can autocast to ``float32``
 ``conv_transpose1d``,
 ``conv_transpose2d``,
 ``conv_transpose3d``,
-``batch_norm``,
-``dropout``,
-``avg_pool1d``,
-``avg_pool2d``,
 ``avg_pool3d``,
-``gelu``,
-``upsample_nearest1d``,
-``_upsample_nearest_exact1d``,
-``upsample_nearest2d``,
-``_upsample_nearest_exact2d``,
-``upsample_nearest3d``,
-``_upsample_nearest_exact3d``,
-``upsample_linear1d``,
-``upsample_bilinear2d``,
-``upsample_trilinear3d``,
 ``binary_cross_entropy``,
-``binary_cross_entropy_with_logits``,
-``instance_norm``,
 ``grid_sampler``,
+``grid_sampler_2d``,
+``_grid_sampler_2d_cpu_fallback``,
+``grid_sampler_3d``,
 ``polar``,
-``multinomial``,
-``poisson``,
-``fmod``,
 ``prod``,
 ``quantile``,
 ``nanquantile``,
 ``stft``,
 ``cdist``,
-``cross``,
-``cumprod``,
-``cumsum``,
-``diag``,
-``diagflat``,
-``histc``,
-``logcumsumexp``,
-``searchsorted``,
 ``trace``,
-``tril``,
-``triu``,
-``vander``,
 ``view_as_complex``,
 ``cholesky``,
 ``cholesky_inverse``,
 ``cholesky_solve``,
-``dot``,
 ``inverse``,
 ``lu_solve``,
-``matrix_rank``,
 ``orgqr``,
 ``inverse``,
 ``ormqr``,
 ``pinverse``,
-``vdot``,
-``im2col``,
-``col2im``,
 ``max_pool3d``,
 ``max_unpool2d``,
 ``max_unpool3d``,
@@ -336,18 +317,6 @@ CPU Ops that can autocast to ``float32``
 ``replication_pad1d``,
 ``replication_pad2d``,
 ``replication_pad3d``,
-``elu``,
-``hardshrink``,
-``hardsigmoid``,
-``hardswish``,
-``log_sigmoid``,
-``prelu``,
-``selu``,
-``celu``,
-``softplus``,
-``softshrink``,
-``group_norm``,
-``smooth_l1_loss``,
 ``mse_loss``,
 ``ctc_loss``,
 ``kl_div``,
@@ -366,7 +335,6 @@ CPU Ops that can autocast to ``float32``
 ``fft_irfftn``,
 ``fft_hfft``,
 ``fft_ihfft``,
-``conv_tbc``,
 ``linalg_matrix_norm``,
 ``linalg_cond``,
 ``linalg_matrix_rank``,
@@ -380,14 +348,10 @@ CPU Ops that can autocast to ``float32``
 ``linalg_tensorinv``,
 ``linalg_tensorsolve``,
 ``fake_quantize_per_tensor_affine``,
-``glu``,
-``cummax``,
-``cummin``,
 ``eig``,
 ``geqrf``,
 ``lstsq``,
 ``_lu_with_info``,
-``lu_unpack``,
 ``qr``,
 ``solve``,
 ``svd``,
@@ -395,8 +359,6 @@ CPU Ops that can autocast to ``float32``
 ``triangular_solve``,
 ``fractional_max_pool2d``,
 ``fractional_max_pool3d``,
-``adaptive_max_pool1d``,
-``adaptive_max_pool2d``,
 ``adaptive_max_pool3d``,
 ``multilabel_margin_loss_forward``,
 ``linalg_qr``,

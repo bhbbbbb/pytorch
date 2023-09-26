@@ -1,11 +1,10 @@
 #ifdef USE_XNNPACK
 
 #include <ATen/native/xnnpack/Common.h>
+#include <ATen/native/xnnpack/Engine.h>
 #include <ATen/native/utils/Factory.h>
 
-namespace at {
-namespace native {
-namespace xnnpack {
+namespace at::native::xnnpack {
 
 bool use_channel_shuffle(
     const Tensor& input,
@@ -55,7 +54,7 @@ Tensor channel_shuffle(
       },
       input_padded_contig_nhwc.options().dtype(),
       MemoryFormat::ChannelsLast,
-      input_padded_contig_nhwc.names());
+      input_padded_contig_nhwc.opt_names());
 
   int64_t channels_per_group =
       input_padded_contig_nhwc.size(Layout::Activation4D::channels) / groups;
@@ -102,8 +101,6 @@ Tensor channel_shuffle(
   return output_padded_contig_nhwc.contiguous(input.suggest_memory_format());
 }
 
-} // namespace xnnpack
-} // namespace native
-} // namespace at
+} // namespace at::native::xnnpack
 
 #endif /* USE_XNNPACK */

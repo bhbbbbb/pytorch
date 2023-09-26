@@ -1,4 +1,4 @@
-ir_version: 4
+ir_version: 8
 producer_name: "pytorch"
 producer_version: "CURRENT_VERSION"
 graph {
@@ -49,8 +49,13 @@ graph {
       f: 0.7
       type: FLOAT
     }
+    attribute {
+      name: "training_mode"
+      i: 0
+      type: INT
+    }
   }
-  name: "torch_jit"
+  name: "main_graph"
   initializer {
     dims: 128
     data_type: 1
@@ -135,5 +140,5 @@ graph {
   }
 }
 opset_import {
-  version: 9
+  version: 17
 }

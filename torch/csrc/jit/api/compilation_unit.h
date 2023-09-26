@@ -8,7 +8,6 @@
 #include <torch/csrc/jit/runtime/graph_executor.h>
 
 #include <torch/csrc/Export.h>
-#include <torch/csrc/utils/memory.h>
 
 #include <ATen/core/function_schema.h>
 #include <ATen/core/qualified_name.h>
@@ -132,7 +131,7 @@ struct TORCH_API CompilationUnit {
     if (shouldMangle) {
       name = mangle(name);
     }
-    auto fn = torch::make_unique<GraphFunction>(
+    auto fn = std::make_unique<GraphFunction>(
         std::move(name), std::move(graph), nullptr);
     auto ret = fn.get();
     register_function(std::move(fn));
@@ -227,10 +226,11 @@ struct TORCH_API CompilationUnit {
           // Tombstone the method in the compilation unit.
           // Don't erase because the dict_
           auto it = dict_.find(method->qualname());
-          TORCH_INTERNAL_ASSERT(it != dict_.end());
-          functions_[it->second] = nullptr;
-          // Erase in our big lookup table
-          dict_.erase(it);
+          if (it != dict_.end()) {
+            functions_[it->second] = nullptr;
+            // Erase in our big lookup table
+            dict_.erase(it);
+          }
         }
         // Classes can have multiple pointers to the same hook,
         // need to make sure to not delete it twice

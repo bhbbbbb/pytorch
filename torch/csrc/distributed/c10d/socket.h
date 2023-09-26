@@ -12,7 +12,8 @@
 #include <string>
 
 #include <c10/macros/Macros.h>
-#include <c10d/exception.h>
+#include <c10/util/Exception.h>
+#include <torch/csrc/distributed/c10d/exception.h>
 
 namespace c10d {
 namespace detail {
@@ -39,7 +40,7 @@ class SocketOptions {
     return connect_timeout_;
   }
 
-private:
+ private:
   bool prefer_ipv6_ = true;
   std::chrono::seconds connect_timeout_{30};
 };
@@ -54,7 +55,12 @@ class Socket {
 
   static Socket listen(std::uint16_t port, const SocketOptions& opts = {});
 
-  static Socket connect(const std::string& host, std::uint16_t port, const SocketOptions& opts = {});
+  static Socket listenFromFd(int fd, std::uint16_t expected_port);
+
+  static Socket connect(
+      const std::string& host,
+      std::uint16_t port,
+      const SocketOptions& opts = {});
 
   Socket() noexcept = default;
 
@@ -74,6 +80,8 @@ class Socket {
 
   std::uint16_t port() const;
 
+  bool waitForInput(std::chrono::milliseconds timeout);
+
  private:
   explicit Socket(std::unique_ptr<SocketImpl>&& impl) noexcept;
 
@@ -81,20 +89,5 @@ class Socket {
 };
 
 } // namespace detail
-
-class TORCH_API SocketError : public C10dError {
- public:
-  using C10dError::C10dError;
-
-  SocketError(const SocketError&) = default;
-
-  SocketError& operator=(const SocketError&) = default;
-
-  SocketError(SocketError&&) = default;
-
-  SocketError& operator=(SocketError&&) = default;
-
-  ~SocketError() override;
-};
 
 } // namespace c10d

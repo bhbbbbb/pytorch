@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -7,8 +8,6 @@
 #include <thread>
 #include <utility>
 
-#include <c10/util/Optional.h>
-#include <c10/util/intrusive_ptr.h>
 #include <c10/util/numa.h>
 #include <c10/util/thread_name.h>
 
@@ -19,7 +18,6 @@ C10_CLANG_DIAGNOSTIC_IGNORE("-Wshorten-64-to-32")
 
 namespace c10 {
 
-// TODO: move this to C10 and make it C10_API
 class C10_API TaskThreadPoolBase {
  public:
   virtual void run(std::function<void()> func) = 0;
@@ -36,15 +34,9 @@ class C10_API TaskThreadPoolBase {
    */
   virtual bool inThreadPool() const = 0;
 
-  virtual ~TaskThreadPoolBase() noexcept {}
+  virtual ~TaskThreadPoolBase() noexcept = default;
 
-  static size_t defaultNumThreads() {
-    auto num_threads = std::thread::hardware_concurrency();
-#if defined(_M_X64) || defined(__x86_64__)
-    num_threads /= 2;
-#endif
-    return num_threads;
-  }
+  static size_t defaultNumThreads();
 };
 
 class C10_API ThreadPool : public c10::TaskThreadPoolBase {
@@ -77,7 +69,7 @@ class C10_API ThreadPool : public c10::TaskThreadPoolBase {
   explicit ThreadPool(
       int pool_size,
       int numa_node_id = -1,
-      std::function<void()> init_thread = nullptr);
+      const std::function<void()>& init_thread = nullptr);
 
   ~ThreadPool() override;
 

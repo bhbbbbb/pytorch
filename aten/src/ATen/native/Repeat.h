@@ -1,9 +1,16 @@
 #pragma once
 
-#include <ATen/ATen.h>
+#include <ATen/core/Tensor.h>
+#include <ATen/TensorOperators.h>
 
-namespace at {
-namespace native {
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#else
+#include <ATen/ops/empty.h>
+#include <ATen/ops/empty_like.h>
+#endif
+
+namespace at::native {
 
 template <
     typename index_t,
@@ -38,5 +45,4 @@ static inline Tensor repeat_interleave_common(
   return result;
 }
 
-} // namespace native
-} // namespace at
+} // namespace at::native

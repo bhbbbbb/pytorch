@@ -1,13 +1,24 @@
-#include <ATen/ATen.h>
-#include <ATen/NativeFunctions.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
+#include <ATen/Dispatch.h>
 #include <ATen/TensorUtils.h>
 
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/detail/KernelUtils.h>
 #include <c10/util/Exception.h>
 
-namespace at {
-namespace native {
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/max_unpool2d_native.h>
+#include <ATen/ops/max_unpool3d_native.h>
+
+#include <ATen/ops/empty.h>
+#include <ATen/ops/empty_like.h>
+#endif
+
+namespace at::native {
 
 using namespace at::cuda::detail;
 
@@ -27,11 +38,13 @@ __global__ void max_unpooling2d_forward_kernel(
     const int64_t outputHeight,
     const int64_t outputWidth,
     T* output) {
+  int64_t outputImageSize = outputHeight * outputWidth;
   CUDA_KERNEL_LOOP(linearIndex, numInputElements) {
     int c = (linearIndex / inputWidth / inputHeight) % numChannels;
     int n = linearIndex / inputWidth / inputHeight / numChannels;
     output += (n * numChannels + c) * outputHeight * outputWidth;
     int maxind = indices[linearIndex];
+    CUDA_KERNEL_ASSERT(maxind >= 0 && maxind < outputImageSize);
     output[maxind] = input[linearIndex];
   }
 }
@@ -49,9 +62,11 @@ __global__ void max_unpooling3d_forward_kernel(
   int64_t iRow = blockIdx.y * blockDim.y + threadIdx.y;
   int64_t iFrame = (blockIdx.z + offsetZ) % input.size(1); // input frame/time
   int64_t slice = (blockIdx.z + offsetZ) / input.size(1); // input slice/feature
+  int64_t outputImageSize = oT * oH * oW;
   if (iRow < input.size(2) && iColumn < input.size(3)) {
     T val = input[slice][iFrame][iRow][iColumn];
     int64_t index = indices[slice][iFrame][iRow][iColumn];
+    CUDA_KERNEL_ASSERT(index >= 0 && index < outputImageSize);
     output[slice * oT * oH * oW + index] = val;
   }
 }
@@ -78,7 +93,7 @@ __global__ void max_unpooling2d_backward_kernel(
 
 template <typename T>
 __global__ void max_unpooling3d_backward_kernel(
-    T* gradOutputData,
+    const T* gradOutputData,
     int64_t oT,
     int64_t oH,
     int64_t oW,
@@ -102,6 +117,10 @@ Tensor& max_unpooling2d_forward_out_cuda(const Tensor& self_,
     const Tensor& indices_,
     IntArrayRef output_size,
     Tensor& output) {
+  // See Note [Writing Nondeterministic Operations]
+  // Nondeterministic with duplicate indices
+  at::globalContext().alertNotDeterministic("max_unpooling2d_forward_out");
+
   TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
   TORCH_CHECK(
       indices_.scalar_type() == at::ScalarType::Long,
@@ -128,7 +147,7 @@ Tensor& max_unpooling2d_forward_out_cuda(const Tensor& self_,
       "Expected shape of indices to be: ", self_.sizes(), " but got: ", indices_.sizes());
   TORCH_CHECK(
       output_size.size() == 2,
-      "There should be exactly two elements (width, height) in output_size, but got ", output_size.size(), " elements.");
+      "There should be exactly two elements (height, width) in output_size, but got ", output_size.size(), " elements.");
 
   int64_t dimw = 2;
   int64_t dimh = 1;
@@ -164,14 +183,14 @@ Tensor& max_unpooling2d_forward_out_cuda(const Tensor& self_,
               0,
               at::cuda::getCurrentCUDAStream()>>>(
               self.numel(),
-              self.data_ptr<scalar_t>(),
-              indices.data_ptr<int64_t>(),
+              self.const_data_ptr<scalar_t>(),
+              indices.const_data_ptr<int64_t>(),
               numChannels,
               inputHeight,
               inputWidth,
               oheight,
               owidth,
-              output.data_ptr<scalar_t>());
+              output.mutable_data_ptr<scalar_t>());
           C10_CUDA_KERNEL_LAUNCH_CHECK();
         }));
   }
@@ -275,6 +294,10 @@ Tensor& max_unpooling3d_forward_out_cuda(const Tensor& self_,
     IntArrayRef stride,
     IntArrayRef padding,
     Tensor& output) {
+  // See Note [Writing Nondeterministic Operations]
+  // Nondeterministic with duplicate indices
+  at::globalContext().alertNotDeterministic("max_unpooling3d_forward_out");
+
   TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
   max_unpooling3d_shape_check(
     self_, Tensor(), indices_, output_size, stride, padding, "max_unpooling3d_forward_out_cuda()");
@@ -349,7 +372,7 @@ Tensor& max_unpooling3d_forward_out_cuda(const Tensor& self_,
               at::cuda::getCurrentCUDAStream()>>>(
               self.packed_accessor64<scalar_t, 4>(),
               indices.packed_accessor64<int64_t, 4>(),
-              output.data_ptr<scalar_t>(),
+              output.mutable_data_ptr<scalar_t>(),
               oT,
               oH,
               oW,
@@ -451,14 +474,14 @@ at::Tensor& max_unpooling2d_backward_out_cuda(const Tensor& grad_output_,
             0,
             at::cuda::getCurrentCUDAStream()>>>(
             count,
-            grad_output.data_ptr<scalar_t>(),
-            indices.data_ptr<int64_t>(),
+            grad_output.const_data_ptr<scalar_t>(),
+            indices.const_data_ptr<int64_t>(),
             nInputPlane,
             nInputRows,
             nInputCols,
             oheight,
             owidth,
-            grad_input.data_ptr<scalar_t>());
+            grad_input.mutable_data_ptr<scalar_t>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       }));
   return grad_input;
@@ -558,7 +581,7 @@ at::Tensor& max_unpooling3d_backward_out_cuda(const Tensor& grad_output_,
               block,
               0,
               at::cuda::getCurrentCUDAStream()>>>(
-              grad_output.data_ptr<scalar_t>(),
+              grad_output.const_data_ptr<scalar_t>(),
               oT,
               oH,
               oW,
@@ -586,5 +609,4 @@ at::Tensor max_unpooling3d_backward_cuda(
   return grad_input;
 }
 
-} // namespace native
-} // namespace at
+} // namespace at::native

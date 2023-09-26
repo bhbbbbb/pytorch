@@ -2,6 +2,7 @@
 
 #include <ATen/native/DispatchStub.h>
 #include <ATen/Generator.h>
+#include <c10/core/Scalar.h>
 #include <stdexcept>
 
 namespace at {
@@ -10,15 +11,21 @@ class TensorBase;
 struct TensorIteratorBase;
 }
 
-namespace at { namespace native {
+namespace at::native {
 
 using unary_fn = void(*)(TensorIteratorBase&);
 using unary_fn_with_scalar = void(*)(TensorIteratorBase&, const Scalar& a);
 
+inline namespace CPU_CAPABILITY {
+void conj_kernel(TensorIteratorBase &iter);
+void neg_kernel(TensorIteratorBase &iter);
+void reciprocal_kernel(TensorIteratorBase &iter);
+void rsqrt_kernel(TensorIteratorBase& iter);
+void sqrt_kernel(TensorIteratorBase& iter);
+} // namespace CPU_CAPABILITY
+
 DECLARE_DISPATCH(unary_fn, abs_stub);
 DECLARE_DISPATCH(unary_fn, angle_stub);
-DECLARE_DISPATCH(unary_fn, real_stub);
-DECLARE_DISPATCH(unary_fn, imag_stub);
 DECLARE_DISPATCH(unary_fn, conj_physical_stub);
 DECLARE_DISPATCH(unary_fn, acos_stub);
 DECLARE_DISPATCH(unary_fn, acosh_stub);
@@ -52,6 +59,7 @@ DECLARE_DISPATCH(unary_fn, log10_stub);
 DECLARE_DISPATCH(unary_fn, log1p_stub);
 DECLARE_DISPATCH(unary_fn, log2_stub);
 DECLARE_DISPATCH(unary_fn, special_ndtri_stub);
+DECLARE_DISPATCH(unary_fn, special_log_ndtr_stub);
 DECLARE_DISPATCH(unary_fn, neg_stub);
 
 DECLARE_DISPATCH(unary_fn, reciprocal_stub);
@@ -71,6 +79,18 @@ DECLARE_DISPATCH(unary_fn, tanh_stub);
 DECLARE_DISPATCH(unary_fn, trigamma_stub);
 DECLARE_DISPATCH(unary_fn, trunc_stub);
 DECLARE_DISPATCH(unary_fn, lgamma_stub);
+DECLARE_DISPATCH(unary_fn, special_airy_ai_stub);
+DECLARE_DISPATCH(unary_fn, special_bessel_j0_stub);
+DECLARE_DISPATCH(unary_fn, special_bessel_j1_stub);
+DECLARE_DISPATCH(unary_fn, special_bessel_y0_stub);
+DECLARE_DISPATCH(unary_fn, special_bessel_y1_stub);
+DECLARE_DISPATCH(unary_fn, special_modified_bessel_i0_stub);
+DECLARE_DISPATCH(unary_fn, special_modified_bessel_i1_stub);
+DECLARE_DISPATCH(unary_fn, special_modified_bessel_k0_stub);
+DECLARE_DISPATCH(unary_fn, special_modified_bessel_k1_stub);
+DECLARE_DISPATCH(unary_fn, special_scaled_modified_bessel_k0_stub);
+DECLARE_DISPATCH(unary_fn, special_scaled_modified_bessel_k1_stub);
+DECLARE_DISPATCH(unary_fn, special_spherical_bessel_j0_stub);
 
 // NB: these are actually defined in Distribution
 DECLARE_DISPATCH(void(*)(const TensorBase&, const TensorBase&, c10::optional<Generator>), bernoulli_tensor_stub);
@@ -107,4 +127,4 @@ DECLARE_DISPATCH(void (*)(TensorIteratorBase&, int64_t), round_decimals_stub);
 // clone
 // contiguous
 // zero
-}} // namespace at::native
+} // namespace at::native

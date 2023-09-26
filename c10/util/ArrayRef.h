@@ -15,7 +15,6 @@
 
 #pragma once
 
-#include <c10/util/C++17.h>
 #include <c10/util/Deprecated.h>
 #include <c10/util/Exception.h>
 #include <c10/util/SmallVector.h>
@@ -25,7 +24,6 @@
 #include <vector>
 
 namespace c10 {
-
 /// ArrayRef - Represent a constant reference to an array (0 or more elements
 /// consecutively in memory), i.e. a start pointer and a length.  It allows
 /// various APIs to take consecutive elements easily and conveniently.
@@ -92,7 +90,6 @@ class ArrayRef final {
     debugCheckNullptrInvariant();
   }
 
-  /// Construct an ArrayRef from a generic Container.
   template <
       typename Container,
       typename = std::enable_if_t<std::is_same<
@@ -205,7 +202,9 @@ class ArrayRef final {
   }
 
   /// slice(n) - Chop off the first N elements of the array.
-  constexpr ArrayRef<T> slice(size_t N) const {
+  C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA ArrayRef<T> slice(size_t N) const {
+    TORCH_CHECK(
+        N <= size(), "ArrayRef: invalid slice, N = ", N, "; size = ", size());
     return slice(N, size() - N);
   }
 
@@ -257,7 +256,7 @@ template <typename T>
 std::ostream& operator<<(std::ostream& out, ArrayRef<T> list) {
   int i = 0;
   out << "[";
-  for (auto e : list) {
+  for (const auto& e : list) {
     if (i++ > 0)
       out << ", ";
     out << e;

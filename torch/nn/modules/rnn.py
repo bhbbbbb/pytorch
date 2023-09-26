@@ -1,6 +1,7 @@
 import math
 import warnings
 import numbers
+import weakref
 from typing import List, Tuple, Optional, overload
 
 import torch
@@ -11,17 +12,35 @@ from ..utils.rnn import PackedSequence
 from .. import init
 from ... import _VF
 
+__all__ = ['RNNBase', 'RNN', 'LSTM', 'GRU', 'RNNCellBase', 'RNNCell', 'LSTMCell', 'GRUCell']
+
 _rnn_impls = {
     'RNN_TANH': _VF.rnn_tanh,
     'RNN_RELU': _VF.rnn_relu,
 }
 
 
-def apply_permutation(tensor: Tensor, permutation: Tensor, dim: int = 1) -> Tensor:
+def _apply_permutation(tensor: Tensor, permutation: Tensor, dim: int = 1) -> Tensor:
     return tensor.index_select(dim, permutation)
 
 
+def apply_permutation(tensor: Tensor, permutation: Tensor, dim: int = 1) -> Tensor:
+    warnings.warn("apply_permutation is deprecated, please use tensor.index_select(dim, permutation) instead")
+    return _apply_permutation(tensor, permutation, dim)
+
+
 class RNNBase(Module):
+    r"""Base class for RNN modules (RNN, LSTM, GRU).
+
+    Implements aspects of RNNs shared by the RNN, LSTM, and GRU classes, such as module initialization
+    and utility methods for parameter storage management.
+
+    .. note::
+        The forward method is not implemented by the RNNBase class.
+
+    .. note::
+        LSTM and GRU classes override some methods implemented by RNNBase.
+    """
     __constants__ = ['mode', 'input_size', 'hidden_size', 'num_layers', 'bias',
                      'batch_first', 'dropout', 'bidirectional', 'proj_size']
     __jit_unused_properties__ = ['all_weights']
@@ -41,7 +60,7 @@ class RNNBase(Module):
                  dropout: float = 0., bidirectional: bool = False, proj_size: int = 0,
                  device=None, dtype=None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(RNNBase, self).__init__()
+        super().__init__()
         self.mode = mode
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -51,6 +70,7 @@ class RNNBase(Module):
         self.dropout = float(dropout)
         self.bidirectional = bidirectional
         self.proj_size = proj_size
+        self._flat_weight_refs: List[Optional[weakref.ReferenceType[Parameter]]] = []
         num_directions = 2 if bidirectional else 1
 
         if not isinstance(dropout, numbers.Number) or not 0 <= dropout <= 1 or \
@@ -61,8 +81,15 @@ class RNNBase(Module):
         if dropout > 0 and num_layers == 1:
             warnings.warn("dropout option adds dropout after all but last "
                           "recurrent layer, so non-zero dropout expects "
-                          "num_layers greater than 1, but got dropout={} and "
-                          "num_layers={}".format(dropout, num_layers))
+                          f"num_layers greater than 1, but got dropout={dropout} and "
+                          f"num_layers={num_layers}")
+
+        if not isinstance(hidden_size, int):
+            raise TypeError(f"hidden_size should be of type int, got: {type(hidden_size).__name__}")
+        if hidden_size <= 0:
+            raise ValueError("hidden_size must be greater than zero")
+        if num_layers <= 0:
+            raise ValueError("num_layers must be greater than zero")
         if proj_size < 0:
             raise ValueError("proj_size should be a positive integer or zero to disable projections")
         if proj_size >= hidden_size:
@@ -118,17 +145,23 @@ class RNNBase(Module):
                 self._flat_weights_names.extend(param_names)
                 self._all_weights.append(param_names)
 
-        self._flat_weights = [(lambda wn: getattr(self, wn) if hasattr(self, wn) else None)(wn) for wn in self._flat_weights_names]
-        self.flatten_parameters()
+        self._init_flat_weights()
 
         self.reset_parameters()
+
+    def _init_flat_weights(self):
+        self._flat_weights = [getattr(self, wn) if hasattr(self, wn) else None
+                              for wn in self._flat_weights_names]
+        self._flat_weight_refs = [weakref.ref(w) if w is not None else None
+                                  for w in self._flat_weights]
+        self.flatten_parameters()
 
     def __setattr__(self, attr, value):
         if hasattr(self, "_flat_weights_names") and attr in self._flat_weights_names:
             # keep self._flat_weights up to date if you do self.weight = ...
             idx = self._flat_weights_names.index(attr)
             self._flat_weights[idx] = value
-        super(RNNBase, self).__setattr__(attr, value)
+        super().__setattr__(attr, value)
 
     def flatten_parameters(self) -> None:
         """Resets parameter data pointer so that they can use faster code paths.
@@ -158,7 +191,7 @@ class RNNBase(Module):
         # a sufficient check, because overlapping parameter buffers that don't completely
         # alias would break the assumptions of the uniqueness check in
         # Module.named_parameters().
-        unique_data_ptrs = set(p.data_ptr() for p in self._flat_weights)
+        unique_data_ptrs = {p.data_ptr() for p in self._flat_weights}
         if len(unique_data_ptrs) != len(self._flat_weights):
             return
 
@@ -178,15 +211,13 @@ class RNNBase(Module):
                         self.hidden_size, self.proj_size, self.num_layers,
                         self.batch_first, bool(self.bidirectional))
 
-    def _apply(self, fn):
-        ret = super(RNNBase, self)._apply(fn)
+    def _apply(self, fn, recurse=True):
+        ret = super()._apply(fn, recurse)
 
         # Resets _flat_weights
         # Note: be v. careful before removing this, as 3rd party device types
         # likely rely on this behavior to properly .to() modules like LSTM.
-        self._flat_weights = [(lambda wn: getattr(self, wn) if hasattr(self, wn) else None)(wn) for wn in self._flat_weights_names]
-        # Flattens params (on CUDA)
-        self.flatten_parameters()
+        self._init_flat_weights()
 
         return ret
 
@@ -196,15 +227,16 @@ class RNNBase(Module):
             init.uniform_(weight, -stdv, stdv)
 
     def check_input(self, input: Tensor, batch_sizes: Optional[Tensor]) -> None:
+        if not torch.jit.is_scripting():
+            if input.dtype != self._flat_weights[0].dtype and not torch._C._is_any_autocast_enabled():
+                raise ValueError(f'input must have the type {self._flat_weights[0].dtype}, got type {input.dtype}')
         expected_input_dim = 2 if batch_sizes is not None else 3
         if input.dim() != expected_input_dim:
             raise RuntimeError(
-                'input must have {} dimensions, got {}'.format(
-                    expected_input_dim, input.dim()))
+                f'input must have {expected_input_dim} dimensions, got {input.dim()}')
         if self.input_size != input.size(-1):
             raise RuntimeError(
-                'input.size(-1) must be equal to input_size. Expected {}, got {}'.format(
-                    self.input_size, input.size(-1)))
+                f'input.size(-1) must be equal to input_size. Expected {self.input_size}, got {input.size(-1)}')
 
     def get_expected_hidden_size(self, input: Tensor, batch_sizes: Optional[Tensor]) -> Tuple[int, int, int]:
         if batch_sizes is not None:
@@ -225,6 +257,17 @@ class RNNBase(Module):
         if hx.size() != expected_hidden_size:
             raise RuntimeError(msg.format(expected_hidden_size, list(hx.size())))
 
+    def _weights_have_changed(self):
+        # Returns True if the weight tensors have changed since the last forward pass.
+        # This is the case when used with torch.func.functional_call(), for example.
+        weights_changed = False
+        for ref, name in zip(self._flat_weight_refs, self._flat_weights_names):
+            weight = getattr(self, name) if hasattr(self, name) else None
+            if weight is not None and ref is not None and ref() is not weight:
+                weights_changed = True
+                break
+        return weights_changed
+
     def check_forward_args(self, input: Tensor, hidden: Tensor, batch_sizes: Optional[Tensor]):
         self.check_input(input, batch_sizes)
         expected_hidden_size = self.get_expected_hidden_size(input, batch_sizes)
@@ -234,7 +277,7 @@ class RNNBase(Module):
     def permute_hidden(self, hx: Tensor, permutation: Optional[Tensor]):
         if permutation is None:
             return hx
-        return apply_permutation(hx, permutation)
+        return _apply_permutation(hx, permutation)
 
 
     def extra_repr(self) -> str:
@@ -253,8 +296,21 @@ class RNNBase(Module):
             s += ', bidirectional={bidirectional}'
         return s.format(**self.__dict__)
 
+    def _update_flat_weights(self):
+        if not torch.jit.is_scripting():
+            if self._weights_have_changed():
+                self._init_flat_weights()
+
+    def __getstate__(self):
+        # If weights have been changed, update the _flat_weights in __getstate__ here.
+        self._update_flat_weights()
+        # Don't serialize the weight references.
+        state = self.__dict__.copy()
+        del state['_flat_weight_refs']
+        return state
+
     def __setstate__(self, d):
-        super(RNNBase, self).__setstate__(d)
+        super().__setstate__(d)
         if 'all_weights' in d:
             self._all_weights = d['all_weights']
         # In PyTorch 1.8 we added a proj_size member variable to LSTM.
@@ -263,40 +319,43 @@ class RNNBase(Module):
         if 'proj_size' not in d:
             self.proj_size = 0
 
-        if isinstance(self._all_weights[0][0], str):
-            return
-        num_layers = self.num_layers
-        num_directions = 2 if self.bidirectional else 1
-        self._flat_weights_names = []
-        self._all_weights = []
-        for layer in range(num_layers):
-            for direction in range(num_directions):
-                suffix = '_reverse' if direction == 1 else ''
-                weights = ['weight_ih_l{}{}', 'weight_hh_l{}{}', 'bias_ih_l{}{}',
-                           'bias_hh_l{}{}', 'weight_hr_l{}{}']
-                weights = [x.format(layer, suffix) for x in weights]
-                if self.bias:
-                    if self.proj_size > 0:
-                        self._all_weights += [weights]
-                        self._flat_weights_names.extend(weights)
+        if not isinstance(self._all_weights[0][0], str):
+            num_layers = self.num_layers
+            num_directions = 2 if self.bidirectional else 1
+            self._flat_weights_names = []
+            self._all_weights = []
+            for layer in range(num_layers):
+                for direction in range(num_directions):
+                    suffix = '_reverse' if direction == 1 else ''
+                    weights = ['weight_ih_l{}{}', 'weight_hh_l{}{}', 'bias_ih_l{}{}',
+                               'bias_hh_l{}{}', 'weight_hr_l{}{}']
+                    weights = [x.format(layer, suffix) for x in weights]
+                    if self.bias:
+                        if self.proj_size > 0:
+                            self._all_weights += [weights]
+                            self._flat_weights_names.extend(weights)
+                        else:
+                            self._all_weights += [weights[:4]]
+                            self._flat_weights_names.extend(weights[:4])
                     else:
-                        self._all_weights += [weights[:4]]
-                        self._flat_weights_names.extend(weights[:4])
-                else:
-                    if self.proj_size > 0:
-                        self._all_weights += [weights[:2]] + [weights[-1:]]
-                        self._flat_weights_names.extend(weights[:2] + [weights[-1:]])
-                    else:
-                        self._all_weights += [weights[:2]]
-                        self._flat_weights_names.extend(weights[:2])
-        self._flat_weights = [(lambda wn: getattr(self, wn) if hasattr(self, wn) else None)(wn) for wn in self._flat_weights_names]
+                        if self.proj_size > 0:
+                            self._all_weights += [weights[:2]] + [weights[-1:]]
+                            self._flat_weights_names.extend(weights[:2] + [weights[-1:]])
+                        else:
+                            self._all_weights += [weights[:2]]
+                            self._flat_weights_names.extend(weights[:2])
+            self._flat_weights = [getattr(self, wn) if hasattr(self, wn) else None
+                                  for wn in self._flat_weights_names]
+
+        self._flat_weight_refs = [weakref.ref(w) if w is not None else None
+                                  for w in self._flat_weights]
 
     @property
     def all_weights(self) -> List[List[Parameter]]:
         return [[getattr(self, weight) for weight in weights] for weights in self._all_weights]
 
     def _replicate_for_data_parallel(self):
-        replica = super(RNNBase, self)._replicate_for_data_parallel()
+        replica = super()._replicate_for_data_parallel()
         # Need to copy these caches, otherwise the replica will share the same
         # flat weights list.
         replica._flat_weights = replica._flat_weights[:]
@@ -305,15 +364,16 @@ class RNNBase(Module):
 
 
 class RNN(RNNBase):
-    r"""Applies a multi-layer Elman RNN with :math:`\tanh` or :math:`\text{ReLU}` non-linearity to an
-    input sequence.
+    r"""__init__(self,input_size,hidden_size,num_layers=1,nonlinearity='tanh',bias=True,batch_first=False,dropout=0.0,bidirectional=False,device=None,dtype=None)
 
+    Applies a multi-layer Elman RNN with :math:`\tanh` or :math:`\text{ReLU}` non-linearity to an
+    input sequence.
 
     For each element in the input sequence, each layer computes the following
     function:
 
     .. math::
-        h_t = \tanh(W_{ih} x_t + b_{ih} + W_{hh} h_{(t-1)} + b_{hh})
+        h_t = \tanh(x_t W_{ih}^T + b_{ih} + h_{t-1}W_{hh}^T + b_{hh})
 
     where :math:`h_t` is the hidden state at time `t`, :math:`x_t` is
     the input at time `t`, and :math:`h_{(t-1)}` is the hidden state of the
@@ -407,6 +467,17 @@ class RNN(RNNBase):
         >>> output, hn = rnn(input, h0)
     """
 
+    @overload
+    def __init__(self, input_size: int, hidden_size: int, num_layers: int = 1,
+                 nonlinearity: str = 'tanh', bias: bool = True, batch_first: bool = False,
+                 dropout: float = 0., bidirectional: bool = False, device=None,
+                 dtype=None) -> None:
+        ...
+
+    @overload
+    def __init__(self, *args, **kwargs):
+        ...
+
     def __init__(self, *args, **kwargs):
         if 'proj_size' in kwargs:
             raise ValueError("proj_size argument is only supported for LSTM, not RNN or GRU")
@@ -416,8 +487,8 @@ class RNN(RNNBase):
         elif self.nonlinearity == 'relu':
             mode = 'RNN_RELU'
         else:
-            raise ValueError("Unknown nonlinearity '{}'".format(self.nonlinearity))
-        super(RNN, self).__init__(mode, *args, **kwargs)
+            raise ValueError(f"Unknown nonlinearity '{self.nonlinearity}'. Select from 'tanh' or 'relu'.")
+        super().__init__(mode, *args, **kwargs)
 
     @overload
     @torch._jit_internal._overload_method  # noqa: F811
@@ -430,12 +501,27 @@ class RNN(RNNBase):
         pass
 
     def forward(self, input, hx=None):  # noqa: F811
+        self._update_flat_weights()
+
+        num_directions = 2 if self.bidirectional else 1
         orig_input = input
+
         if isinstance(orig_input, PackedSequence):
             input, batch_sizes, sorted_indices, unsorted_indices = input
-            max_batch_size = int(batch_sizes[0])
+            max_batch_size = batch_sizes[0]
+            # script() is unhappy when max_batch_size is different type in cond branches, so we duplicate
+            if hx is None:
+                hx = torch.zeros(self.num_layers * num_directions,
+                                 max_batch_size, self.hidden_size,
+                                 dtype=input.dtype, device=input.device)
+            else:
+                # Each batch of the hidden state should match the input sequence that
+                # the user believes he/she is passing in.
+                hx = self.permute_hidden(hx, sorted_indices)
         else:
             batch_sizes = None
+            if input.dim() not in (2, 3):
+                raise ValueError(f"RNN: Expected input to be 2D or 3D, got {input.dim()}D tensor instead")
             is_batched = input.dim() == 3
             batch_dim = 0 if self.batch_first else 1
             if not is_batched:
@@ -452,16 +538,14 @@ class RNN(RNNBase):
             max_batch_size = input.size(0) if self.batch_first else input.size(1)
             sorted_indices = None
             unsorted_indices = None
-
-        if hx is None:
-            num_directions = 2 if self.bidirectional else 1
-            hx = torch.zeros(self.num_layers * num_directions,
-                             max_batch_size, self.hidden_size,
-                             dtype=input.dtype, device=input.device)
-        else:
-            # Each batch of the hidden state should match the input sequence that
-            # the user believes he/she is passing in.
-            hx = self.permute_hidden(hx, sorted_indices)
+            if hx is None:
+                hx = torch.zeros(self.num_layers * num_directions,
+                                 max_batch_size, self.hidden_size,
+                                 dtype=input.dtype, device=input.device)
+            else:
+                # Each batch of the hidden state should match the input sequence that
+                # the user believes he/she is passing in.
+                hx = self.permute_hidden(hx, sorted_indices)
 
         assert hx is not None
         self.check_forward_args(input, hx, batch_sizes)
@@ -510,10 +594,13 @@ class RNN(RNNBase):
 #
 # TODO: remove the overriding implementations for LSTM and GRU when TorchScript
 # support expressing these two modules generally.
-class LSTM(RNNBase):
-    r"""Applies a multi-layer long short-term memory (LSTM) RNN to an input
-    sequence.
 
+
+class LSTM(RNNBase):
+    r"""__init__(self,input_size,hidden_size,num_layers=1,bias=True,batch_first=False,dropout=0.0,bidirectional=False,proj_size=0,device=None,dtype=None)
+
+    Applies a multi-layer long short-term memory (LSTM) RNN to an input
+    sequence.
 
     For each element in the input sequence, each layer computes the following
     function:
@@ -536,7 +623,7 @@ class LSTM(RNNBase):
     :math:`\sigma` is the sigmoid function, and :math:`\odot` is the Hadamard product.
 
     In a multilayer LSTM, the input :math:`x^{(l)}_t` of the :math:`l` -th layer
-    (:math:`l >= 2`) is the hidden state :math:`h^{(l-1)}_t` of the previous layer multiplied by
+    (:math:`l \ge 2`) is the hidden state :math:`h^{(l-1)}_t` of the previous layer multiplied by
     dropout :math:`\delta^{(l-1)}_t` where each :math:`\delta^{(l-1)}_t` is a Bernoulli random
     variable which is :math:`0` with probability :attr:`dropout`.
 
@@ -656,6 +743,9 @@ class LSTM(RNNBase):
     .. note::
         ``batch_first`` argument is ignored for unbatched inputs.
 
+    .. note::
+        ``proj_size`` should be smaller than ``hidden_size``.
+
     .. include:: ../cudnn_rnn_determinism.rst
 
     .. include:: ../cudnn_persistent_rnn.rst
@@ -669,8 +759,18 @@ class LSTM(RNNBase):
         >>> output, (hn, cn) = rnn(input, (h0, c0))
     """
 
+    @overload
+    def __init__(self, input_size: int, hidden_size: int, num_layers: int = 1, bias: bool = True,
+                 batch_first: bool = False, dropout: float = 0., bidirectional: bool = False,
+                 proj_size: int = 0, device=None, dtype=None) -> None:
+        ...
+
+    @overload
     def __init__(self, *args, **kwargs):
-        super(LSTM, self).__init__('LSTM', *args, **kwargs)
+        ...
+
+    def __init__(self, *args, **kwargs):
+        super().__init__('LSTM', *args, **kwargs)
 
     def get_expected_cell_size(self, input: Tensor, batch_sizes: Optional[Tensor]) -> Tuple[int, int, int]:
         if batch_sizes is not None:
@@ -702,7 +802,7 @@ class LSTM(RNNBase):
                        ) -> Tuple[Tensor, Tensor]:
         if permutation is None:
             return hx
-        return apply_permutation(hx[0], permutation), apply_permutation(hx[1], permutation)
+        return _apply_permutation(hx[0], permutation), _apply_permutation(hx[1], permutation)
 
     # Same as above, see torch/nn/modules/module.py::_forward_unimplemented
     @overload  # type: ignore[override]
@@ -719,15 +819,32 @@ class LSTM(RNNBase):
         pass
 
     def forward(self, input, hx=None):  # noqa: F811
+        self._update_flat_weights()
+
         orig_input = input
         # xxx: isinstance check needs to be in conditional for TorchScript to compile
         batch_sizes = None
+        do_permute = False
+        num_directions = 2 if self.bidirectional else 1
+        real_hidden_size = self.proj_size if self.proj_size > 0 else self.hidden_size
         if isinstance(orig_input, PackedSequence):
             input, batch_sizes, sorted_indices, unsorted_indices = input
             max_batch_size = batch_sizes[0]
-            max_batch_size = int(max_batch_size)
+            if hx is None:
+                h_zeros = torch.zeros(self.num_layers * num_directions,
+                                      max_batch_size, real_hidden_size,
+                                      dtype=input.dtype, device=input.device)
+                c_zeros = torch.zeros(self.num_layers * num_directions,
+                                      max_batch_size, self.hidden_size,
+                                      dtype=input.dtype, device=input.device)
+                hx = (h_zeros, c_zeros)
+            else:
+                # Each batch of the hidden state should match the input sequence that
+                # the user believes he/she is passing in.
+                hx = self.permute_hidden(hx, sorted_indices)
         else:
-            batch_sizes = None
+            if input.dim() not in (2, 3):
+                raise ValueError(f"LSTM: Expected input to be 2D or 3D, got {input.dim()}D instead")
             is_batched = input.dim() == 3
             batch_dim = 0 if self.batch_first else 1
             if not is_batched:
@@ -735,19 +852,15 @@ class LSTM(RNNBase):
             max_batch_size = input.size(0) if self.batch_first else input.size(1)
             sorted_indices = None
             unsorted_indices = None
-
-        if hx is None:
-            num_directions = 2 if self.bidirectional else 1
-            real_hidden_size = self.proj_size if self.proj_size > 0 else self.hidden_size
-            h_zeros = torch.zeros(self.num_layers * num_directions,
-                                  max_batch_size, real_hidden_size,
-                                  dtype=input.dtype, device=input.device)
-            c_zeros = torch.zeros(self.num_layers * num_directions,
-                                  max_batch_size, self.hidden_size,
-                                  dtype=input.dtype, device=input.device)
-            hx = (h_zeros, c_zeros)
-        else:
-            if batch_sizes is None:  # If not PackedSequence input.
+            if hx is None:
+                h_zeros = torch.zeros(self.num_layers * num_directions,
+                                      max_batch_size, real_hidden_size,
+                                      dtype=input.dtype, device=input.device)
+                c_zeros = torch.zeros(self.num_layers * num_directions,
+                                      max_batch_size, self.hidden_size,
+                                      dtype=input.dtype, device=input.device)
+                hx = (h_zeros, c_zeros)
+            else:
                 if is_batched:
                     if (hx[0].dim() != 3 or hx[1].dim() != 3):
                         msg = ("For batched 3-D input, hx and cx should "
@@ -759,12 +872,11 @@ class LSTM(RNNBase):
                                f"also be 2-D but got ({hx[0].dim()}-D, {hx[1].dim()}-D) tensors")
                         raise RuntimeError(msg)
                     hx = (hx[0].unsqueeze(1), hx[1].unsqueeze(1))
+                # Each batch of the hidden state should match the input sequence that
+                # the user believes he/she is passing in.
+                self.check_forward_args(input, hx, batch_sizes)
+                hx = self.permute_hidden(hx, sorted_indices)
 
-            # Each batch of the hidden state should match the input sequence that
-            # the user believes he/she is passing in.
-            hx = self.permute_hidden(hx, sorted_indices)
-
-        self.check_forward_args(input, hx, batch_sizes)
         if batch_sizes is None:
             result = _VF.lstm(input, hx, self._flat_weights, self.bias, self.num_layers,
                               self.dropout, self.training, self.bidirectional, self.batch_first)
@@ -785,8 +897,9 @@ class LSTM(RNNBase):
 
 
 class GRU(RNNBase):
-    r"""Applies a multi-layer gated recurrent unit (GRU) RNN to an input sequence.
+    r"""__init__(self,input_size,hidden_size,num_layers=1,bias=True,batch_first=False,dropout=0.0,bidirectional=False,device=None,dtype=None)
 
+    Applies a multi-layer gated recurrent unit (GRU) RNN to an input sequence.
 
     For each element in the input sequence, each layer computes the following
     function:
@@ -806,7 +919,7 @@ class GRU(RNNBase):
     :math:`\sigma` is the sigmoid function, and :math:`*` is the Hadamard product.
 
     In a multilayer GRU, the input :math:`x^{(l)}_t` of the :math:`l` -th layer
-    (:math:`l >= 2`) is the hidden state :math:`h^{(l-1)}_t` of the previous layer multiplied by
+    (:math:`l \ge 2`) is the hidden state :math:`h^{(l-1)}_t` of the previous layer multiplied by
     dropout :math:`\delta^{(l-1)}_t` where each :math:`\delta^{(l-1)}_t` is a Bernoulli random
     variable which is :math:`0` with probability :attr:`dropout`.
 
@@ -851,7 +964,7 @@ class GRU(RNNBase):
             \end{aligned}
 
     Outputs: output, h_n
-        * **output**: tensor of shape :math:`(L, H_{in})` for unbatched input,
+        * **output**: tensor of shape :math:`(L, D * H_{out})` for unbatched input,
           :math:`(L, N, D * H_{out})` when ``batch_first=False`` or
           :math:`(N, L, D * H_{out})` when ``batch_first=True`` containing the output features
           `(h_t)` from the last layer of the GRU, for each `t`. If a
@@ -884,6 +997,26 @@ class GRU(RNNBase):
     .. note::
         ``batch_first`` argument is ignored for unbatched inputs.
 
+    .. note::
+        The calculation of new gate :math:`n_t` subtly differs from the original paper and other frameworks.
+        In the original implementation, the Hadamard product :math:`(*)` between :math:`r_t` and the
+        previous hidden state :math:`h_{(t-1)}` is done before the multiplication with the weight matrix
+        `W` and addition of bias:
+
+        .. math::
+            \begin{aligned}
+                n_t = \tanh(W_{in} x_t + b_{in} + W_{hn} ( r_t * h_{(t-1)} ) + b_{hn})
+            \end{aligned}
+
+        This is in contrast to PyTorch implementation, which is done after :math:`W_{hn} h_{(t-1)}`
+
+        .. math::
+            \begin{aligned}
+                n_t = \tanh(W_{in} x_t + b_{in} + r_t * (W_{hn} h_{(t-1)}+ b_{hn}))
+            \end{aligned}
+
+        This implementation differs on purpose for efficiency.
+
     .. include:: ../cudnn_persistent_rnn.rst
 
     Examples::
@@ -894,10 +1027,20 @@ class GRU(RNNBase):
         >>> output, hn = rnn(input, h0)
     """
 
+    @overload
+    def __init__(self, input_size: int, hidden_size: int, num_layers: int = 1, bias: bool = True,
+                 batch_first: bool = False, dropout: float = 0., bidirectional: bool = False,
+                 device=None, dtype=None) -> None:
+        ...
+
+    @overload
+    def __init__(self, *args, **kwargs):
+        ...
+
     def __init__(self, *args, **kwargs):
         if 'proj_size' in kwargs:
             raise ValueError("proj_size argument is only supported for LSTM, not RNN or GRU")
-        super(GRU, self).__init__('GRU', *args, **kwargs)
+        super().__init__('GRU', *args, **kwargs)
 
     @overload  # type: ignore[override]
     @torch._jit_internal._overload_method  # noqa: F811
@@ -910,14 +1053,26 @@ class GRU(RNNBase):
         pass
 
     def forward(self, input, hx=None):  # noqa: F811
+        self._update_flat_weights()
+
         orig_input = input
         # xxx: isinstance check needs to be in conditional for TorchScript to compile
         if isinstance(orig_input, PackedSequence):
             input, batch_sizes, sorted_indices, unsorted_indices = input
             max_batch_size = batch_sizes[0]
-            max_batch_size = int(max_batch_size)
+            if hx is None:
+                num_directions = 2 if self.bidirectional else 1
+                hx = torch.zeros(self.num_layers * num_directions,
+                                 max_batch_size, self.hidden_size,
+                                 dtype=input.dtype, device=input.device)
+            else:
+                # Each batch of the hidden state should match the input sequence that
+                # the user believes he/she is passing in.
+                hx = self.permute_hidden(hx, sorted_indices)
         else:
             batch_sizes = None
+            if input.dim() not in (2, 3):
+                raise ValueError(f"GRU: Expected input to be 2D or 3D, got {input.dim()}D instead")
             is_batched = input.dim() == 3
             batch_dim = 0 if self.batch_first else 1
             if not is_batched:
@@ -934,16 +1089,15 @@ class GRU(RNNBase):
             max_batch_size = input.size(0) if self.batch_first else input.size(1)
             sorted_indices = None
             unsorted_indices = None
-
-        if hx is None:
-            num_directions = 2 if self.bidirectional else 1
-            hx = torch.zeros(self.num_layers * num_directions,
-                             max_batch_size, self.hidden_size,
-                             dtype=input.dtype, device=input.device)
-        else:
-            # Each batch of the hidden state should match the input sequence that
-            # the user believes he/she is passing in.
-            hx = self.permute_hidden(hx, sorted_indices)
+            if hx is None:
+                num_directions = 2 if self.bidirectional else 1
+                hx = torch.zeros(self.num_layers * num_directions,
+                                 max_batch_size, self.hidden_size,
+                                 dtype=input.dtype, device=input.device)
+            else:
+                # Each batch of the hidden state should match the input sequence that
+                # the user believes he/she is passing in.
+                hx = self.permute_hidden(hx, sorted_indices)
 
         self.check_forward_args(input, hx, batch_sizes)
         if batch_sizes is None:
@@ -981,7 +1135,7 @@ class RNNCellBase(Module):
     def __init__(self, input_size: int, hidden_size: int, bias: bool, num_chunks: int,
                  device=None, dtype=None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(RNNCellBase, self).__init__()
+        super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.bias = bias
@@ -1061,8 +1215,8 @@ class RNNCell(RNNCellBase):
         >>> hx = torch.randn(3, 20)
         >>> output = []
         >>> for i in range(6):
-                hx = rnn(input[i], hx)
-                output.append(hx)
+        ...     hx = rnn(input[i], hx)
+        ...     output.append(hx)
     """
     __constants__ = ['input_size', 'hidden_size', 'bias', 'nonlinearity']
     nonlinearity: str
@@ -1070,12 +1224,14 @@ class RNNCell(RNNCellBase):
     def __init__(self, input_size: int, hidden_size: int, bias: bool = True, nonlinearity: str = "tanh",
                  device=None, dtype=None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(RNNCell, self).__init__(input_size, hidden_size, bias, num_chunks=1, **factory_kwargs)
+        super().__init__(input_size, hidden_size, bias, num_chunks=1, **factory_kwargs)
         self.nonlinearity = nonlinearity
 
     def forward(self, input: Tensor, hx: Optional[Tensor] = None) -> Tensor:
-        assert input.dim() in (1, 2), \
-            f"RNNCell: Expected input to be 1-D or 2-D but received {input.dim()}-D tensor"
+        if input.dim() not in (1, 2):
+            raise ValueError(f"RNNCell: Expected input to be 1D or 2D, got {input.dim()}D instead")
+        if hx is not None and hx.dim() not in (1, 2):
+            raise ValueError(f"RNNCell: Expected hidden to be 1D or 2D, got {hx.dim()}D instead")
         is_batched = input.dim() == 2
         if not is_batched:
             input = input.unsqueeze(0)
@@ -1100,7 +1256,7 @@ class RNNCell(RNNCellBase):
         else:
             ret = input  # TODO: remove when jit supports exception flow
             raise RuntimeError(
-                "Unknown nonlinearity: {}".format(self.nonlinearity))
+                f"Unknown nonlinearity: {self.nonlinearity}")
 
         if not is_batched:
             ret = ret.squeeze(0)
@@ -1153,27 +1309,33 @@ class LSTMCell(RNNCellBase):
         All the weights and biases are initialized from :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})`
         where :math:`k = \frac{1}{\text{hidden\_size}}`
 
+    On certain ROCm devices, when using float16 inputs this module will use :ref:`different precision<fp16_on_mi200>` for backward.
+
     Examples::
 
-        >>> rnn = nn.LSTMCell(10, 20) # (input_size, hidden_size)
-        >>> input = torch.randn(2, 3, 10) # (time_steps, batch, input_size)
-        >>> hx = torch.randn(3, 20) # (batch, hidden_size)
+        >>> rnn = nn.LSTMCell(10, 20)  # (input_size, hidden_size)
+        >>> input = torch.randn(2, 3, 10)  # (time_steps, batch, input_size)
+        >>> hx = torch.randn(3, 20)  # (batch, hidden_size)
         >>> cx = torch.randn(3, 20)
         >>> output = []
         >>> for i in range(input.size()[0]):
-                hx, cx = rnn(input[i], (hx, cx))
-                output.append(hx)
+        ...     hx, cx = rnn(input[i], (hx, cx))
+        ...     output.append(hx)
         >>> output = torch.stack(output, dim=0)
     """
 
     def __init__(self, input_size: int, hidden_size: int, bias: bool = True,
                  device=None, dtype=None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(LSTMCell, self).__init__(input_size, hidden_size, bias, num_chunks=4, **factory_kwargs)
+        super().__init__(input_size, hidden_size, bias, num_chunks=4, **factory_kwargs)
 
     def forward(self, input: Tensor, hx: Optional[Tuple[Tensor, Tensor]] = None) -> Tuple[Tensor, Tensor]:
-        assert input.dim() in (1, 2), \
-            f"LSTMCell: Expected input to be 1-D or 2-D but received {input.dim()}-D tensor"
+        if input.dim() not in (1, 2):
+            raise ValueError(f"LSTMCell: Expected input to be 1D or 2D, got {input.dim()}D instead")
+        if hx is not None:
+            for idx, value in enumerate(hx):
+                if value.dim() not in (1, 2):
+                    raise ValueError(f"LSTMCell: Expected hx[{idx}] to be 1D or 2D, got {value.dim()}D instead")
         is_batched = input.dim() == 2
         if not is_batched:
             input = input.unsqueeze(0)
@@ -1244,6 +1406,8 @@ class GRUCell(RNNCellBase):
         All the weights and biases are initialized from :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})`
         where :math:`k = \frac{1}{\text{hidden\_size}}`
 
+    On certain ROCm devices, when using float16 inputs this module will use :ref:`different precision<fp16_on_mi200>` for backward.
+
     Examples::
 
         >>> rnn = nn.GRUCell(10, 20)
@@ -1251,18 +1415,20 @@ class GRUCell(RNNCellBase):
         >>> hx = torch.randn(3, 20)
         >>> output = []
         >>> for i in range(6):
-                hx = rnn(input[i], hx)
-                output.append(hx)
+        ...     hx = rnn(input[i], hx)
+        ...     output.append(hx)
     """
 
     def __init__(self, input_size: int, hidden_size: int, bias: bool = True,
                  device=None, dtype=None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
-        super(GRUCell, self).__init__(input_size, hidden_size, bias, num_chunks=3, **factory_kwargs)
+        super().__init__(input_size, hidden_size, bias, num_chunks=3, **factory_kwargs)
 
     def forward(self, input: Tensor, hx: Optional[Tensor] = None) -> Tensor:
-        assert input.dim() in (1, 2), \
-            f"GRUCell: Expected input to be 1-D or 2-D but received {input.dim()}-D tensor"
+        if input.dim() not in (1, 2):
+            raise ValueError(f"GRUCell: Expected input to be 1D or 2D, got {input.dim()}D instead")
+        if hx is not None and hx.dim() not in (1, 2):
+            raise ValueError(f"GRUCell: Expected hidden to be 1D or 2D, got {hx.dim()}D instead")
         is_batched = input.dim() == 2
         if not is_batched:
             input = input.unsqueeze(0)

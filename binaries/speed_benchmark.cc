@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
         vector<string> input_dims_str = caffe2::split(',', input_dims_list[i]);
         vector<int> input_dims;
         for (const string& s : input_dims_str) {
-          input_dims.push_back(c10::stoi(s));
+          input_dims.push_back(std::stoi(s));
         }
         caffe2::Blob* blob = workspace->GetBlob(input_names[i]);
         if (blob == nullptr) {
@@ -136,12 +136,12 @@ int main(int argc, char** argv) {
         if (input_type_list[i] == "uint8_t") {
           caffe2::int8::Int8TensorCPU* tensor =
               blob->GetMutable<caffe2::int8::Int8TensorCPU>();
-          CHECK_NOTNULL(tensor);
+          TORCH_CHECK_NOTNULL(tensor);
           tensor->t.Resize(input_dims);
           tensor->t.mutable_data<uint8_t>();
         } else if (input_type_list[i] == "float") {
           caffe2::TensorCPU* tensor = BlobGetMutableTensor(blob, caffe2::CPU);
-          CHECK_NOTNULL(tensor);
+          TORCH_CHECK_NOTNULL(tensor);
           tensor->Resize(input_dims);
           tensor->mutable_data<float>();
         } else {
@@ -184,7 +184,7 @@ int main(int argc, char** argv) {
   }
 
   caffe2::NetBase* net = workspace->CreateNet(net_def);
-  CHECK_NOTNULL(net);
+  TORCH_CHECK_NOTNULL(net);
   CAFFE_ENFORCE(net->Run());
   net->TEST_Benchmark(FLAGS_warmup, FLAGS_iter, FLAGS_run_individual);
 

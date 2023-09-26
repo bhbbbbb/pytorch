@@ -13,6 +13,10 @@ from collections import namedtuple
 from functools import wraps
 from typing import Dict, Optional
 
+__all__ = ['MetricsConfig', 'MetricHandler', 'ConsoleMetricHandler', 'NullMetricHandler', 'MetricStream',
+           'configure', 'getStream', 'prof', 'profile', 'put_metric', 'publish_metric', 'get_elapsed_time_ms',
+           'MetricData']
+
 MetricData = namedtuple("MetricData", ["timestamp", "group_name", "name", "value"])
 
 
@@ -34,12 +38,7 @@ class MetricHandler(abc.ABC):
 class ConsoleMetricHandler(MetricHandler):
     def emit(self, metric_data: MetricData):
         print(
-            "[{}][{}]: {}={}".format(
-                metric_data.timestamp,
-                metric_data.group_name,
-                metric_data.name,
-                metric_data.value,
-            )
+            f"[{metric_data.timestamp}][{metric_data.group_name}]: {metric_data.name}={metric_data.value}"
         )
 
 
@@ -64,7 +63,7 @@ _default_metrics_handler: MetricHandler = NullMetricHandler()
 
 
 # pyre-fixme[9]: group has type `str`; used as `None`.
-def configure(handler: MetricHandler, group: str = None):
+def configure(handler: MetricHandler, group: Optional[str] = None):
     if group is None:
         global _default_metrics_handler
         # pyre-fixme[9]: _default_metrics_handler has type `NullMetricHandler`; used
@@ -158,14 +157,14 @@ def profile(group=None):
             try:
                 start_time = time.time()
                 result = func(*args, **kwargs)
-                publish_metric(group, "{}.success".format(func.__name__), 1)
+                publish_metric(group, f"{func.__name__}.success", 1)
             except Exception:
-                publish_metric(group, "{}.failure".format(func.__name__), 1)
+                publish_metric(group, f"{func.__name__}.failure", 1)
                 raise
             finally:
                 publish_metric(
                     group,
-                    "{}.duration.ms".format(func.__name__),
+                    f"{func.__name__}.duration.ms",
                     get_elapsed_time_ms(start_time),
                 )
             return result
